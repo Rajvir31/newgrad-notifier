@@ -7,10 +7,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "poll": "node src/poll.js",
-    "bootstrap": "node src/poll.js --bootstrap",
-    "dry": "node src/poll.js --dry",
+    "poll": "node --env-file-if-exists=.env src/poll.js",
+    "bootstrap": "node --env-file-if-exists=.env src/poll.js --bootstrap",
+    "dry": "node --env-file-if-exists=.env src/poll.js --dry",
     "test": "node src/test.js",
-    "ui": "node src/ui.js"
+    "ui": "node src/ui.js",
+    "doctor": "node --env-file-if-exists=.env src/doctor.js"
   }
 }

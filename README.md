@@ -14,6 +14,7 @@ src/filter.js    is it new-grad? is it SWE? which channel?
 src/slack.js     Block Kit + rate-limited delivery
 src/poll.js      orchestration + seen-state
 src/ui.js        local dashboard server
+src/doctor.js    setup checker (npm run doctor)
 public/app.html  the dashboard itself
 src/test.js      self-check (node src/test.js)
 ```
@@ -35,21 +36,62 @@ what remembers what you have applied to.
 The Slack setup below is only needed if you want to be *pushed* new roles rather
 than checking the board yourself.
 
-## Setup
+## Setup (Slack alerts)
 
-**1. Slack app.** api.slack.com/apps → Create New App → From scratch → pick your
-workspace. Under *OAuth & Permissions* add the bot scopes `chat:write` and
-`chat:write.public` (the second one lets the bot post to public channels without
-being invited). Install to Workspace, copy the `xoxb-…` token.
+Only needed if you want roles *pushed* to you. The board above works without any
+of this.
 
-Leave *Interactivity* switched **off**. The Apply button is a plain URL button
-and still navigates fine; turning interactivity on without a Request URL means
-clickers get an error.
+**1. Workspace.** If you don't have one to use, make a free one at
+slack.com/get-started (a personal workspace is fine). Create two channels:
+`#usa` and `#canada`.
 
-**2. Channels.** Create `#usa` and `#canada`, then copy each channel ID from
-*View channel details* (bottom of the dialog, `C…`).
+**2. App.** api.slack.com/apps -> Create New App -> From scratch -> name it,
+pick your workspace. Then *OAuth & Permissions* -> Bot Token Scopes -> add both:
 
-**3. Repo config.** Settings → Secrets and variables → Actions:
+    chat:write          post messages
+    chat:write.public   post without being invited to each channel
+
+Scroll up, *Install to Workspace*, authorize, and copy the **Bot User OAuth
+Token** — it starts `xoxb-`. (The one starting `xoxp-` is a user token; wrong one.)
+
+Leave *Interactivity* **off**. The Apply button is a plain URL button and works
+fine; switching Interactivity on without a Request URL makes clickers see an error.
+
+**3. Channel IDs.** In Slack, click the channel name -> *View channel details* ->
+the ID is at the very bottom of that dialog, like `C09ABCDEFGH`. Not the `#name`.
+
+**4. Test it locally first.** Create a `.env` in the repo root (already gitignored):
+
+```
+SLACK_BOT_TOKEN=xoxb-your-token
+SLACK_CHANNEL_US=C09ABCDEFGH
+SLACK_CHANNEL_CA=C09ZYXWVUTS
+```
+
+```bash
+npm run doctor
+```
+
+It checks reachability, the token, both scopes, and posts one real test message
+to each channel. Every misconfiguration here fails *silently* in production —
+Slack answers HTTP 200 on a dead token — so get a clean run before going further.
+
+**5. Seed the state**, or the first live run fires ~370 backlogged roles at once:
+
+```bash
+npm run bootstrap    # records what is currently open, posts nothing
+```
+
+**6. Push to GitHub, public.** Not optional: 144 runs/day is ~4,320 runs a month,
+which blows the 2,000-minute Free allowance on a private repo. Public repos get
+free runner minutes. Nothing secret is committed — the state file holds truncated
+hashes, not job data, and `.env` is ignored.
+
+```bash
+gh repo create newgrad-notifier --public --source=. --push
+```
+
+**7. Repo config.** Settings -> Secrets and variables -> Actions:
 
 | Where | Name | Value |
 | --- | --- | --- |
@@ -62,24 +104,18 @@ sensitive, and Actions masks secret values everywhere they appear, so as secrets
 the logs read `posted 3/3 to ***` — redacting the one field you need when
 delivery breaks.
 
-**4. Make the repo public.** Not optional — 144 runs/day is roughly 4,320 runs a
-month, which blows the 2,000-minute GitHub Free allowance for a private repo.
-Public repos get free runner minutes. Nothing secret is committed; the state file
-holds truncated hashes, not job data.
+**8. Enable it.** Actions tab -> enable workflows -> *poll-jobs* -> **Run
+workflow** to fire it once by hand. Check the log says `slack ok:` and
+`posted n/n`. After that it runs every 10 minutes on its own.
 
-**5. Seed the state**, so the first run does not fire 350 backlogged roles:
+**Then leave it alone**, except: a public repo's scheduled workflows are
+auto-disabled after 60 days with no repository activity, and it is undocumented
+whether the bot's own state commits reset that clock. Hit *Run workflow* once
+every ~50 days, or push anything.
 
-```bash
-npm run bootstrap    # records what is currently open, posts nothing
-git add data/seen.json && git commit -m "seed" && git push
-```
-
-Then enable Actions. `npm run dry` prints what *would* be posted without sending
-or saving anything.
-
-**6. Landing page** (optional). `public/index.html` deploys to Vercel as-is.
-Put your Slack shared-invite link in `vercel.json` under the `/join` redirect —
-a Slack invite link expires after **30 days or 400 people**, so keeping it in one
+**Landing page** (optional). `public/index.html` deploys to Vercel as-is. Put
+your Slack shared-invite link in `vercel.json` under the `/join` redirect — an
+invite link expires after **30 days or 400 people**, so keeping it in one
 redirect means rotating it without touching the page.
 
 ## Tuning
