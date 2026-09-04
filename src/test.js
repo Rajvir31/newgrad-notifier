@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { countryOf, channelsFor, isNewGrad, isSweRole, needsClearance } from './filter.js';
 import { blocksFor, postJobs } from './slack.js';
 import { relativeToEpoch, splitLocations } from './sources.js';
-import { normalizeUrl } from './poll.js';
+import { normalizeUrl, collapse, pickFresh, idsOf, KEY } from './poll.js';
 
 // Country routing — every entry here is a trap that bit a naive implementation.
 for (const [loc, want] of [
@@ -252,6 +252,52 @@ assert.deepEqual(splitLocations(undefined), []);
   assert.deepEqual(r.failed, [], 'a successful post reports nothing failed');
 
   globalThis.fetch = realFetch;
+}
+
+// --- Dedup across feeds ----------------------------------------------------
+{
+  const gh = {
+    id: 'gh:stripe:1', source: 'Greenhouse', company: 'Stripe',
+    title: 'Software Engineer, New Grad', url: 'https://stripe.com/jobs/search?gh_jid=1',
+    locations: ['Seattle, WA'], postedAt: 1788484604,
+  };
+  // Same posting as `gh`: same apply URL, but Simplify has rewritten the title
+  // and appended a tracking param. Company+title alone would let both through.
+  const si = {
+    ...gh, id: 'simplify:abc', source: 'Simplify', newGradScoped: true,
+    title: 'Software Engineer – New Grad',
+    url: 'https://stripe.com/jobs/search?gh_jid=1&utm_source=Simplify',
+  };
+  // A different city's requisition: same title, distinct URL, routes to Canada.
+  const ghToronto = {
+    ...gh, id: 'gh:stripe:2',
+    url: 'https://stripe.com/jobs/search?gh_jid=2',
+    locations: ['Toronto, ON, Canada'],
+  };
+
+  let c = collapse([si, gh]);
+  assert.equal(c.length, 1, 'one posting reported by two feeds must collapse to one alert');
+  assert.equal(c[0].source, 'Greenhouse', "the company's own board wins over the aggregator");
+  assert.deepEqual(c[0].alsoSeen, ['simplify:abc'], 'the collapsed copy is remembered');
+  // Order must not change the outcome, or the winner depends on which fetch finished first.
+  assert.equal(collapse([gh, si])[0].id, 'gh:stripe:1');
+
+  // Per-city reqs must survive into their own channels — a channel-blind key
+  // collapsed these and silently deleted the Toronto role from #canada.
+  c = collapse([gh, ghToronto]);
+  assert.equal(c.length, 2, 'same-title reqs in different channels are different jobs');
+  assert.deepEqual(c.map((j) => j.channels), [['US'], ['CA']]);
+
+  // Feed flap: whichever feed is up, the role is announced exactly once, ever.
+  const seenSet = new Set();
+  const runs = [[gh, si], [si], [gh, si], [gh], [si, gh]]; // both, gh down, both, simplify down, both
+  const posted = runs.map((feed) => {
+    const cands = collapse(feed);
+    const fresh = pickFresh(cands, seenSet);
+    for (const j of cands) for (const id of idsOf(j)) seenSet.add(KEY(id));
+    return fresh.length;
+  });
+  assert.deepEqual(posted, [1, 0, 0, 0, 0], 'a flapping feed must not re-announce the same role');
 }
 
 console.log('all assertions passed');

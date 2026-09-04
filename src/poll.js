@@ -76,6 +76,70 @@ export function normalizeUrl(raw) {
   }
 }
 
+/**
+ * Filter to alertable roles and collapse the copies of each one down to a single
+ * candidate. Pure, so the dedup guarantees are testable without the network.
+ *
+ * Two collapse keys are needed:
+ *  - by URL, because Simplify rewrites titles. Notion's board says "Software
+ *    Engineer, Early Career (AI)" while Simplify calls the same posting
+ *    "Software Engineer – Early Career - AI", so company+title alone lets both
+ *    through as separate jobs.
+ *  - by company+title+channel, because one opening is usually listed once per
+ *    city with a distinct URL each time (Stripe posts six identical "Software
+ *    Engineer, New Grad" reqs). Scoping the key to the destination channel
+ *    collapses per-city duplicates within a channel while keeping the Toronto
+ *    req alive for #canada — a channel-blind key silently deleted it.
+ *
+ * Direct ATS feeds sort first, so the company's own wording wins and the result
+ * does not depend on which fetch happened to finish first.
+ */
+export function collapse(jobs, { cutoff = 0 } = {}) {
+  const SOURCE_RANK = { Greenhouse: 0, Ashby: 0, Lever: 0, Workday: 0, Simplify: 1 };
+  const ordered = [...jobs].sort(
+    (a, b) => (SOURCE_RANK[a.source] ?? 9) - (SOURCE_RANK[b.source] ?? 9)
+  );
+
+  const byUrl = new Map();
+  const byTitle = new Map();
+  const candidates = [];
+  for (const job of ordered) {
+    // An alert with no apply link is not worth sending, and Slack rejects a
+    // button without a url outright — which would lose the whole message.
+    if (!job.url || !/^https?:\/\//.test(job.url)) continue;
+    if (!isNewGrad(job) || !isSweRole(job)) continue;
+    if (job.postedAt && cutoff && job.postedAt < cutoff) continue;
+
+    const channels = channelsFor(job);
+    const urlKey = normalizeUrl(job.url);
+    const titleKey = `${job.company}|${job.title}|${channels.join('+')}`.toLowerCase();
+    const winner = byUrl.get(urlKey) ?? byTitle.get(titleKey);
+    if (winner) {
+      // Keep the losing copy's id on the winner. Without it, the role is
+      // announced again the next time the winning feed is down and a different
+      // copy takes over.
+      winner.alsoSeen.push(job.id);
+      continue;
+    }
+    const candidate = { ...job, channels, alsoSeen: [] };
+    byUrl.set(urlKey, candidate);
+    byTitle.set(titleKey, candidate);
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+
+/** Every id this role is known by — the winner's plus every collapsed copy's. */
+export const idsOf = (job) => [job.id, ...(job.alsoSeen || [])];
+
+/**
+ * A role is fresh only if NO copy of it has been seen, from any feed. Testing
+ * just the winner's id re-announces a role whenever the winning feed changes.
+ */
+export function pickFresh(candidates, seenSet) {
+  return candidates.filter((j) => !idsOf(j).some((id) => seenSet.has(KEY(id))));
+}
+
 function describe(job, channels) {
   const where = job.locations?.length ? job.locations.join(' / ') : '?';
   return `[${channels.join('+') || '--'}] ${job.company} — ${job.title}  (${where})  ${job.url}`;
@@ -111,50 +175,9 @@ async function main() {
   const seen = loadSeen();
   const seenSet = new Set(seen);
 
-  // The same role reaches us from several feeds, so it has to be collapsed before
-  // the seen-check or one posting fires twice. TWO keys are needed:
-  //
-  //  - by URL, because Simplify rewrites titles. Notion's board says "Software
-  //    Engineer, Early Career (AI)" while Simplify calls the very same posting
-  //    "Software Engineer – Early Career - AI". Same apply URL, so company+title
-  //    alone lets both through.
-  //  - by company+title, because one opening is often listed once per location
-  //    with a distinct URL each time (Stripe posts six identical "Software
-  //    Engineer, New Grad" reqs; Palantir four).
-  //
-  // Direct ATS feeds are processed first so the company's own wording wins and
-  // the result is deterministic rather than dependent on which fetch finished first.
-  const SOURCE_RANK = { Greenhouse: 0, Ashby: 0, Lever: 0, Workday: 0, Simplify: 1 };
-  const ordered = [...jobs].sort(
-    (a, b) => (SOURCE_RANK[a.source] ?? 9) - (SOURCE_RANK[b.source] ?? 9)
-  );
+  const candidates = collapse(jobs, { cutoff });
 
-  const byUrl = new Set();
-  const byTitle = new Set();
-  const candidates = [];
-  for (const job of ordered) {
-    // An alert with no apply link is not worth sending, and Slack rejects a
-    // button without a url outright — which would lose the whole message.
-    if (!job.url || !/^https?:\/\//.test(job.url)) continue;
-    if (!isNewGrad(job) || !isSweRole(job)) continue;
-    if (job.postedAt && job.postedAt < cutoff) continue;
-
-    const channels = channelsFor(job);
-    const urlKey = normalizeUrl(job.url);
-    // The title key is scoped to the destination channel. Large employers open
-    // one requisition PER CITY with the same title — Stripe posts six identical
-    // "Software Engineer, New Grad" reqs — and a channel-blind key collapsed all
-    // six into one, which silently deleted the Toronto req from #canada.
-    // Scoped this way, per-city reqs still collapse within a channel but a role
-    // that reaches a different channel survives.
-    const titleKey = `${job.company}|${job.title}|${channels.join('+')}`.toLowerCase();
-    if (byUrl.has(urlKey) || byTitle.has(titleKey)) continue;
-    byUrl.add(urlKey);
-    byTitle.add(titleKey);
-    candidates.push({ ...job, channels });
-  }
-
-  const fresh = candidates.filter((j) => !seenSet.has(KEY(j.id)));
+  const fresh = pickFresh(candidates, seenSet);
   // A job is deliverable only if it routes to a channel that is actually
   // configured. If SLACK_CHANNEL_CA is unset or mistyped, Canadian roles are
   // NOT quietly marked seen — that would suppress them permanently while the
@@ -178,7 +201,10 @@ async function main() {
     seen.concat(
       candidates
         .filter((j) => !j.channels.length || (deliverable.has(j.id) && !extraSkip.has(j.id)))
-        .map((j) => KEY(j.id))
+        // Every copy of the role, not just the winning feed's, so a feed going
+        // down later cannot resurrect it as "new".
+        .flatMap(idsOf)
+        .map(KEY)
         .filter((k) => !seenSet.has(k))
     );
   const nextSeen = seedable();
