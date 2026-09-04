@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "public",
+  "redirects": [
+    {
+      "source": "/join",
+      "destination": "https://join.slack.com/t/YOUR-WORKSPACE/shared_invite/REPLACE-ME",
+      "permanent": false
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+name: poll-jobs
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's floor is 5, so this has margin — but scheduled
+    # runs are explicitly best-effort ("can be delayed during periods of high
+    # loads ... some queued jobs may be dropped"), and the :00 slot is the worst
+    # one to ask for. Starting at :03 dodges the top-of-hour pile-up.
+    - cron: '3-59/10 * * * *'
+  workflow_dispatch: # manual kick — and it counts as repo activity, see below
+
+# THE REPO MUST BE PUBLIC. 144 runs/day is ~4,320 runs a month; even at 30s each
+# that is over the 2,000-minute GitHub Free allowance for a private repo. Minutes
+# on standard runners are free for public repos.
+#
+# Public repos also get scheduled workflows auto-disabled after 60 days with no
+# repository activity. It is not documented whether the bot's own state commits
+# reset that clock, so assume they do not: hit "Run workflow" here, or push
+# anything, at least once every ~50 days.
+
+permissions:
+  contents: write # the state commit 403s without this
+
+concurrency:
+  group: poll-jobs
+  cancel-in-progress: false # a late run should queue, never die mid-notification
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7 # persist-credentials defaults true, so the push below is authenticated
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - run: node src/poll.js
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_US: ${{ secrets.SLACK_CHANNEL_US }}
+          SLACK_CHANNEL_CA: ${{ secrets.SLACK_CHANNEL_CA }}
+
+      - name: Commit seen-state
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/seen.json
+          # Exits 0 when nothing is staged, so the step short-circuits before
+          # `git commit` can fail with "nothing to commit". Most polls find no
+          # new jobs and therefore produce no commit at all.
+          git diff --staged --quiet && echo 'no new jobs' && exit 0
+          git commit -m "state: $(date -u +%FT%TZ)"
+          git push || (git pull --rebase && git push)

@@ -1,0 +1,13 @@
+{
+  "name": "newgrad-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "poll": "node src/poll.js",
+    "bootstrap": "node src/poll.js --bootstrap",
+    "dry": "node src/poll.js --dry",
+    "test": "node src/test.js"
+  }
+}

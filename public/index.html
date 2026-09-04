@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NewGradNotifier — new-grad SWE jobs in Slack, within 10 minutes</title>
+<meta name="description" content="New-grad software engineering postings pushed to Slack within 10 minutes of going live. USA and Canada channels. No duplicates, no email spam.">
+<meta property="og:title" content="NewGradNotifier">
+<meta property="og:description" content="New-grad SWE postings in Slack within 10 minutes. USA + Canada channels.">
+<meta property="og:type" content="website">
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f6f7f9;
+    --line: #e3e6ea;
+    --ink: #0d1117;
+    --ink-soft: #57606a;
+    --accent: #2563eb;
+    --accent-ink: #ffffff;
+    --good: #16794a;
+    --bad: #b42318;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10;
+      --bg-soft: #14171c;
+      --line: #262b33;
+      --ink: #e8ecf1;
+      --ink-soft: #97a1af;
+      --accent: #4c8dff;
+      --accent-ink: #06101f;
+      --good: #4ade80;
+      --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 20px; }
+  a { color: var(--accent); }
+
+  header { padding: 72px 0 8px; }
+  .kicker {
+    display: inline-block; font-size: 13px; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; margin-bottom: 22px;
+  }
+  h1 {
+    font-size: clamp(34px, 6vw, 54px); line-height: 1.1; letter-spacing: -.02em;
+    margin: 0 0 18px; font-weight: 700; max-width: 18ch;
+  }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--ink-soft); max-width: 60ch; margin: 0 0 32px; }
+
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 14px; }
+  .btn {
+    display: inline-block; background: var(--accent); color: var(--accent-ink);
+    font-weight: 600; text-decoration: none; padding: 13px 22px; border-radius: var(--radius);
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn-ghost {
+    background: transparent; color: var(--ink); border: 1px solid var(--line);
+  }
+  .fineprint { font-size: 14px; color: var(--ink-soft); margin: 0 0 64px; }
+
+  section { padding: 40px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 22px; letter-spacing: -.01em; margin: 0 0 20px; }
+
+  .cols { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .card { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .card p { margin: 0; color: var(--ink-soft); font-size: 15px; }
+
+  ul.check { list-style: none; padding: 0; margin: 0; }
+  ul.check li { padding-left: 28px; position: relative; margin-bottom: 10px; color: var(--ink-soft); }
+  ul.check li::before { position: absolute; left: 0; top: 0; font-weight: 700; }
+  ul.check.yes li::before { content: "✓"; color: var(--good); }
+  ul.check.no li::before { content: "✕"; color: var(--bad); }
+
+  /* A mock of the actual Slack message the bot posts. */
+  .slack {
+    background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; font-size: 15px; max-width: 520px;
+  }
+  .slack .meta { color: var(--ink-soft); font-size: 13px; margin-bottom: 10px; }
+  .slack .role { font-weight: 700; font-size: 17px; margin-bottom: 10px; }
+  .slack .fields { display: flex; gap: 32px; margin-bottom: 14px; flex-wrap: wrap; }
+  .slack .fields div { font-size: 14px; }
+  .slack .fields b { display: block; font-size: 12px; color: var(--ink-soft); font-weight: 600; }
+  .slack .apply {
+    display: inline-block; background: var(--good); color: #fff; font-weight: 600;
+    font-size: 14px; padding: 7px 16px; border-radius: 6px;
+  }
+  .slack .via { color: var(--ink-soft); font-size: 12px; margin-top: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 9px 12px 9px 0; border-bottom: 1px solid var(--line); }
+  th { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-soft); font-weight: 600; }
+  td.num { color: var(--ink-soft); white-space: nowrap; }
+
+  footer { padding: 40px 0 72px; color: var(--ink-soft); font-size: 14px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <span class="kicker">2026–2027 new-grad season</span>
+    <h1>New-grad roles hit Slack <em>within 10 minutes</em>.</h1>
+    <p class="lede">
+      By hour eight, a Google posting already has thousands of applications ahead of yours.
+      This watches 44 sources — company ATS boards directly, not just aggregators — and pushes
+      every new CS new-grad opening straight to Slack.
+    </p>
+    <div class="cta">
+      <a class="btn" href="/join">Join the Slack</a>
+      <a class="btn btn-ghost" href="#how">How it works</a>
+    </div>
+    <p class="fineprint">Free. Two channels: 🇺🇸 USA and 🍁 Canada. Leave whenever.</p>
+  </header>
+
+  <section id="how">
+    <h2>What lands in your channel</h2>
+    <div class="slack">
+      <div class="meta"><strong>NewGradNotifier</strong> <span>APP</span> · 9:41 AM</div>
+      <div class="role">TD Bank — Associate Software Engineer</div>
+      <div class="fields">
+        <div><b>Location</b>Toronto, ON, Canada</div>
+        <div><b>Posted</b>Today at 9:38 AM</div>
+      </div>
+      <span class="apply">Apply</span>
+      <div class="via">via Workday</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why it catches what boards miss</h2>
+    <div class="cols">
+      <div class="card">
+        <h3>Company boards, not just aggregators</h3>
+        <p>Aggregator feeds rebuild every ~30 minutes. Greenhouse, Ashby, Lever and Workday boards
+           are read directly, so a posting is seen the moment it publishes.</p>
+      </div>
+      <div class="card">
+        <h3>Canada is a real channel</h3>
+        <p>Not a US feed with a filter bolted on. Canadian bank and scale-up boards are polled
+           on their own, and routing knows Vancouver&nbsp;BC from Vancouver&nbsp;WA.</p>
+      </div>
+      <div class="card">
+        <h3>New-grad actually means new-grad</h3>
+        <p>Internships, co-ops, senior reqs, staff roles and AI-labelling gigs are all filtered out
+           before anything reaches a channel.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Before and after</h2>
+    <div class="cols">
+      <div>
+        <ul class="check no">
+          <li>Ten tabs open across GitHub repos, boards and company sites</li>
+          <li>Email digests that arrive hours late, plus spam</li>
+          <li>Big Tech never showing up on your favourite board</li>
+          <li>Eight hours late means buried under thousands of applications</li>
+        </ul>
+      </div>
+      <div>
+        <ul class="check yes">
+          <li>A Slack ping within ten minutes of a posting going live</li>
+          <li>Separate 🇺🇸 USA and 🍁 Canada channels</li>
+          <li>Company ATS boards read directly, aggregators as backup</li>
+          <li>No duplicates. No email. Ever.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where the postings come from</h2>
+    <table>
+      <thead><tr><th>Source</th><th>Covers</th><th class="num">Feeds</th></tr></thead>
+      <tbody>
+        <tr><td>Greenhouse</td><td>Stripe, Databricks, Figma, Reddit, Faire, Shakepay…</td><td class="num">23</td></tr>
+        <tr><td>Ashby</td><td>OpenAI, Notion, Cohere, Wealthsimple, 1Password, Jobber…</td><td class="num">12</td></tr>
+        <tr><td>Lever</td><td>Palantir, Spotify, PointClickCare…</td><td class="num">4</td></tr>
+        <tr><td>Workday</td><td>TD, BMO, Sun Life, CIBC campus</td><td class="num">4</td></tr>
+        <tr><td>SimplifyJobs</td><td>~2,800 open new-grad roles across every other company</td><td class="num">1</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    Built because eight hours late is late. Open source — the poller runs every ten minutes on
+    GitHub Actions. <a href="/join">Join the Slack →</a>
+  </footer>
+
+</div>
+</body>
+</html>
