@@ -132,6 +132,70 @@ your Slack shared-invite link in `vercel.json` under the `/join` redirect — an
 invite link expires after **30 days or 400 people**, so keeping it in one
 redirect means rotating it without touching the page.
 
+
+## If the schedule never fires
+
+GitHub's scheduler is best-effort, and on a brand-new repo it sometimes never
+starts at all. Symptom: `workflow_dispatch` works perfectly, `schedule` produces
+zero runs for hours. Check with:
+
+```bash
+curl -s "https://api.github.com/repos/<owner>/<repo>/actions/runs?event=schedule" | grep total_count
+```
+
+Every *documented* cause is easy to rule out, and worth ruling out before
+assuming the worst — the REST API reports a distinct state for each:
+
+| Cause | How to rule it out |
+| --- | --- |
+| 60-day inactivity auto-disable | workflow state would be `disabled_inactivity`, not `active` |
+| Forked repo (disabled by default) | state would be `disabled_fork` |
+| Wrong branch | schedules run **only** on the default branch, and the file must exist there |
+| Under the 5-minute floor | anything ≥ 5 min is fine |
+| Bad cron syntax | `-`, `,` and `/` are all documented operators; `3-59/10` is valid |
+
+If all of those are clean and it still never fires, you have hit undocumented
+behaviour. It is widely reported (GitHub community discussions #201436, #203822 —
+same shape: new repo, manual works, schedule silent) and **has no known fix other
+than waiting**, sometimes many hours.
+
+Do not keep editing the cron to try to force it. Each edit is an unverified
+attempt at re-registration and may restart whatever internal clock exists.
+
+**The fix is to stop depending on GitHub's clock.** `workflow_dispatch` is proven
+reliable, so drive it from a clock you control and leave the `schedule:` block in
+as a backstop — if it ever wakes up you just get duplicate runs, which the
+seen-set already dedupes.
+
+**1. Make a fine-grained PAT** at github.com/settings/personal-access-tokens/new
+- Repository access: **Only select repositories** → this repo
+- Permissions: **Actions → Read and write** (nothing else)
+- Set an expiry, and a calendar reminder to rotate it
+
+**2. Verify the dispatch works** before wiring anything up:
+
+```bash
+curl -i -X POST   -H "Accept: application/vnd.github+json"   -H "Authorization: Bearer $GH_PAT"   -H "X-GitHub-Api-Version: 2022-11-28"   https://api.github.com/repos/<owner>/<repo>/actions/workflows/poll.yml/dispatches   -d '{"ref":"main"}'
+```
+
+Expect **HTTP 204 No Content**. A 404 here almost always means the token lacks
+Actions:write, not a wrong path.
+
+**3. Point a free external cron at that call.** cron-job.org is the lightest
+option: free, 1-minute granularity, supports custom POST headers. Create a job
+with method POST, the URL above, body `{"ref":"main"}`, and the three headers
+from step 2. Treat 204 as success.
+
+This replaces only the broken part. The poller, filtering, Slack delivery and
+state all keep running on GitHub's runners exactly as before — and since the repo
+is public, those minutes stay free.
+
+Fully-off-GitHub alternatives, if you would rather not depend on it at all:
+**Deno Deploy cron + Deno KV** is the best free one (1M requests and 10 CPU-hours
+a month covers a 10-minute poll comfortably; state moves to KV). Cloudflare
+Workers' free tier does **not** fit — 10 ms CPU per cron invocation, and this
+parses ~10 MB of JSON. Vercel Hobby cron cannot do sub-daily intervals at all.
+
 ## Tuning
 
 - **Companies polled directly** — `BOARDS` at the top of `src/sources.js`.
