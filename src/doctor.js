@@ -5,6 +5,11 @@
 // empty string, and a bot that was never invited just gets `not_in_channel`.
 // So this proves the whole path end to end and posts one real test message.
 
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const API = 'https://slack.com/api';
 
 const token = process.env.SLACK_BOT_TOKEN;
@@ -48,7 +53,24 @@ try {
 
 // 2. Token
 if (!token) {
-  bad('SLACK_BOT_TOKEN is not set', 'put it in a .env file as SLACK_BOT_TOKEN=xoxb-...');
+  // A .env in the wrong place is the nastiest version of this: --env-file-if-exists
+  // just shrugs, so a fully-correct token sitting one directory over looks
+  // identical to having no token at all.
+  const misplaced = [
+    'src/.env', 'public/.env', '.env.txt', '.env.local.txt', 'env', '.env.local',
+  ].filter((p) => existsSync(resolve(ROOT, p)));
+
+  if (misplaced.length) {
+    bad(
+      `SLACK_BOT_TOKEN is not set, but found ${misplaced.join(', ')}`,
+      `only "${resolve(ROOT, '.env')}" is loaded — move it there (note Windows "Save As" appends .txt)`
+    );
+  } else {
+    bad(
+      'SLACK_BOT_TOKEN is not set',
+      `create ${resolve(ROOT, '.env')} — copy .env.example and fill it in`
+    );
+  }
 } else if (!token.startsWith('xoxb-')) {
   bad(
     `SLACK_BOT_TOKEN does not look like a bot token (starts "${token.slice(0, 5)}")`,

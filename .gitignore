@@ -1,5 +1,11 @@
 node_modules/
-.env
+
+# Anything env-shaped. Broader than plain `.env` on purpose: Windows "Save As"
+# silently writes .env.txt, which the narrower rule left untracked-but-committable
+# — and this repo has to be PUBLIC for free Actions minutes.
+.env*
+!.env.example
+
 *.local
 
 # UI snapshot cache — regenerated on demand, unlike data/seen.json which is state
