@@ -51,15 +51,30 @@ export async function checkAuth(token) {
  * - Top-level `text` is the mobile push preview and the accessibility fallback;
  *   a blocks-only message shows up blank in notifications.
  */
-export function blocksFor(job) {
+/**
+ * Normalize a Slack member ID into a mention. Accepts a bare id (U0123ABCD, or
+ * W… on Enterprise Grid) or an already-wrapped <@U0123ABCD>, since both are easy
+ * to end up pasting. Returns '' for anything else rather than emitting a broken
+ * mention that would render as literal text.
+ */
+export function mentionTag(raw) {
+  const id = String(raw || '').trim().replace(/^<@|>$/g, '').split('|')[0];
+  return /^[UW][A-Z0-9]{6,}$/i.test(id) ? `<@${id.toUpperCase()}>` : '';
+}
+
+export function blocksFor(job, mention) {
   const head = `${job.company} — ${job.title}`.slice(0, 150);
   const where = job.locations?.length ? job.locations.join(' • ') : 'Location not listed';
   const when = job.postedAt
     ? `<!date^${job.postedAt}^{date_short_pretty} at {time}|posted recently>`
     : 'recently';
+  const at = mentionTag(mention);
 
   return {
-    text: `${head} (${where})`,
+    // The mention leads the notification preview so the push reads as directed
+    // at you, and is repeated in a rendered mrkdwn block below — a mention that
+    // exists only in the fallback text is not reliably parsed as a real mention.
+    text: `${at ? at + ' ' : ''}${head} (${where})`,
     unfurl_links: false, // else every alert drags in a giant ATS link preview
     unfurl_media: false,
     blocks: [
@@ -82,17 +97,20 @@ export function blocksFor(job) {
           },
         ],
       },
-      { type: 'context', elements: [{ type: 'mrkdwn', text: `via ${job.source}` }] },
+      {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: at ? `${at} · via ${job.source}` : `via ${job.source}` }],
+      },
     ],
   };
 }
 
-async function postOne(token, channel, job) {
+async function postOne(token, channel, job, mention) {
   for (let attempt = 0; attempt < 4; attempt++) {
     // A transport error (ECONNRESET, DNS, TLS) must cost one message, not the
     // whole batch: an uncaught reject here would escape Promise.all and skip
     // the state save, re-posting everything already delivered on the next run.
-    const r = await call('chat.postMessage', token, { channel, ...blocksFor(job) }).catch((e) => ({
+    const r = await call('chat.postMessage', token, { channel, ...blocksFor(job, mention) }).catch((e) => ({
       ok: false,
       error: `network: ${e.message}`,
       status: 0,
@@ -124,14 +142,14 @@ async function postOne(token, channel, job) {
  * through. The caller must keep those out of the seen-set, or a job that failed
  * to post is marked as delivered and never announced.
  */
-export async function postJobs(token, byChannel) {
+export async function postJobs(token, byChannel, mention) {
   const failed = [];
   const results = await Promise.all(
     Object.entries(byChannel).map(async ([channel, jobs]) => {
       let sent = 0;
       for (const [i, job] of jobs.entries()) {
         if (i) await sleep(PACE_MS);
-        if (await postOne(token, channel, job)) sent++;
+        if (await postOne(token, channel, job, mention)) sent++;
         else failed.push(job);
       }
       return [channel, sent, jobs.length];

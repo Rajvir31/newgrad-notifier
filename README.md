@@ -98,11 +98,25 @@ gh repo create newgrad-notifier --public --source=. --push
 | **Secrets** tab | `SLACK_BOT_TOKEN` | `xoxb-…` |
 | **Variables** tab | `SLACK_CHANNEL_US` | `C…` for #usa |
 | **Variables** tab | `SLACK_CHANNEL_CA` | `C…` for #canada |
+| **Variables** tab | `SLACK_MENTION` (optional) | `U…` your member ID |
 
 The channel IDs go in *Variables*, not Secrets, on purpose: they are not
 sensitive, and Actions masks secret values everywhere they appear, so as secrets
 the logs read `posted 3/3 to ***` — redacting the one field you need when
 delivery breaks.
+
+**Getting actually notified.** A bot message in a channel does not necessarily
+push-notify you — Slack has an account-level choice between "Everything" and
+"Mentions and direct messages", and mobile settings are separate from desktop.
+Two ways to be sure:
+
+- Set both channels to **All new messages** (channel name -> Notifications), on
+  desktop *and* in the mobile app; or
+- Set `SLACK_MENTION` to your member ID (your avatar -> Profile -> the `...`
+  button -> **Copy member ID**). Every alert then @-mentions you, which pings
+  regardless of that preference. `npm run doctor` includes the mention in its
+  test message, so you can confirm your phone buzzes without waiting for a real
+  posting.
 
 **8. Enable it.** Actions tab -> enable workflows -> *poll-jobs* -> **Run
 workflow** to fire it once by hand. Check the log says `slack ok:` and

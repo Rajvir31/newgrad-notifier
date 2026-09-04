@@ -253,7 +253,7 @@ async function main() {
     return;
   }
 
-  const { results, failed } = await postJobs(token, byChannel);
+  const { results, failed } = await postJobs(token, byChannel, process.env.SLACK_MENTION);
   for (const [channel, ok, total] of results) console.log(`posted ${ok}/${total} to ${channel}`);
 
   // A job that failed to post must stay unseen, or it is silently suppressed

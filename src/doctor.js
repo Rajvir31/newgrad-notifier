@@ -9,11 +9,15 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { mentionTag } from './slack.js';
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const API = 'https://slack.com/api';
 
 const token = process.env.SLACK_BOT_TOKEN;
 const channels = { US: process.env.SLACK_CHANNEL_US, CA: process.env.SLACK_CHANNEL_CA };
+const mention = process.env.SLACK_MENTION;
+const at = mentionTag(mention);
 
 let failed = 0;
 let authOk = false;
@@ -103,6 +107,19 @@ if (!token) {
   }
 }
 
+// 3b. Mention. Optional, but if it is set and malformed it renders as literal
+//     text like "<@raj>" on every single alert instead of pinging anyone.
+if (!mention) {
+  skip('SLACK_MENTION not set (alerts post without pinging you — see README)');
+} else if (!at) {
+  bad(
+    `SLACK_MENTION="${mention}" is not a member ID`,
+    'Slack -> your avatar -> Profile -> the ... button -> "Copy member ID" (starts with U)'
+  );
+} else {
+  ok(`Will mention ${at} on every alert`);
+}
+
 // 4. Channels — the real test is posting, since we intentionally do not request
 //    the channels:read scope needed to look a channel up.
 const configured = Object.entries(channels).filter(([, id]) => id);
@@ -131,7 +148,12 @@ for (const [name, id] of Object.entries(channels)) {
   }
   const { json } = await call('chat.postMessage', {
     channel: id,
-    text: `NewGradNotifier setup check — ${name} channel is wired up correctly. You can delete this message.`,
+    // The test message carries the same mention a real alert would, so "did my
+    // phone actually buzz?" is answerable without waiting for a real posting.
+    text:
+      `${at ? at + ' ' : ''}NewGradNotifier setup check — ${name} channel is wired up correctly.` +
+      (at ? ' If this pinged you, mentions work.' : '') +
+      ' You can delete this message.',
     unfurl_links: false,
   });
   if (json.ok) ok(`Posted a test message to SLACK_CHANNEL_${name} (${id})`);

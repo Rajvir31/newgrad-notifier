@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { countryOf, channelsFor, isNewGrad, isSweRole, needsClearance } from './filter.js';
-import { blocksFor, postJobs } from './slack.js';
+import { blocksFor, postJobs, mentionTag } from './slack.js';
 import { relativeToEpoch, splitLocations } from './sources.js';
 import { normalizeUrl, collapse, pickFresh, idsOf, KEY } from './poll.js';
 
@@ -171,6 +171,52 @@ assert.equal(needsClearance({ title: 'Developer' }), false);
 
   // Whole payload must be JSON-serializable with no undefined leaking in.
   assert.doesNotMatch(JSON.stringify(p), /undefined/);
+}
+
+// --- @-mentions ------------------------------------------------------------
+// A malformed id renders as literal "<@raj>" on every single alert and pings
+// nobody, so anything that isn't a real member ID must degrade to no mention.
+for (const [input, want] of [
+  ['U0BV1RKUR46', '<@U0BV1RKUR46>'],
+  ['<@U0BV1RKUR46>', '<@U0BV1RKUR46>'],   // already wrapped
+  ['<@U0BV1RKUR46|raj>', '<@U0BV1RKUR46>'], // wrapped with a label
+  ['  U0BV1RKUR46  ', '<@U0BV1RKUR46>'],
+  ['u0bv1rkur46', '<@U0BV1RKUR46>'],
+  ['W012ABCDEFG', '<@W012ABCDEFG>'],       // Enterprise Grid ids start with W
+  ['U123', ''],                            // too short to be an id
+  ['@raj', ''],
+  ['raj', ''],
+  ['', ''],
+  [undefined, ''],
+  [null, ''],
+]) {
+  assert.equal(mentionTag(input), want, `mentionTag(${JSON.stringify(input)})`);
+}
+
+{
+  const job = {
+    company: 'TD Bank', title: 'Associate Software Engineer',
+    locations: ['Toronto, ON, Canada'], url: 'https://example.com/j/1',
+    postedAt: 1788484604, source: 'Workday',
+  };
+  const withMention = blocksFor(job, 'U0BV1RKUR46');
+  // The push preview must lead with it, or the phone notification does not read
+  // as directed at you.
+  assert.match(withMention.text, /^<@U0BV1RKUR46> /);
+  // And it must also appear in a RENDERED mrkdwn block — a mention living only
+  // in the fallback text is not reliably parsed as a real mention.
+  const context = withMention.blocks.at(-1).elements[0];
+  assert.equal(context.type, 'mrkdwn');
+  assert.match(context.text, /<@U0BV1RKUR46>/);
+  // Never in the header: that block is plain_text, so it would render literally.
+  assert.doesNotMatch(withMention.blocks[0].text.text, /<@/);
+
+  // Unset or malformed leaves the card exactly as it was.
+  for (const bad of [undefined, '', 'raj']) {
+    const plain = blocksFor(job, bad);
+    assert.doesNotMatch(JSON.stringify(plain), /<@/, `no stray mention for ${JSON.stringify(bad)}`);
+    assert.equal(plain.blocks.at(-1).elements[0].text, 'via Workday');
+  }
 }
 
 // --- Source helpers --------------------------------------------------------

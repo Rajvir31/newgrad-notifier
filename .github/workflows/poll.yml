@@ -44,6 +44,9 @@ jobs:
           # exactly the field you need when delivery breaks.
           SLACK_CHANNEL_US: ${{ vars.SLACK_CHANNEL_US }}
           SLACK_CHANNEL_CA: ${{ vars.SLACK_CHANNEL_CA }}
+          # Optional. Your Slack member ID — every alert @-mentions you, which
+          # pings regardless of the channel's notification preference.
+          SLACK_MENTION: ${{ vars.SLACK_MENTION }}
 
       - name: Commit seen-state
         run: |
