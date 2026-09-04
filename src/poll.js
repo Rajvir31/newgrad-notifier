@@ -56,6 +56,26 @@ function saveSeen(ids) {
   return kept.length;
 }
 
+// Tracking junk varies by source for the same posting — Simplify appends
+// ?embed=true, Greenhouse adds ?t=&gh_src=. Identifying params must survive:
+// Stripe's absolute_url is the same /jobs/search page for every req and only
+// gh_jid tells them apart, so a blanket query strip would fuse its whole board.
+const TRACKING = /^(embed|ref|source|t|gh_src|utm_[a-z]+)$/i;
+
+export function normalizeUrl(raw) {
+  try {
+    const u = new URL(raw);
+    for (const k of [...u.searchParams.keys()]) if (TRACKING.test(k)) u.searchParams.delete(k);
+    u.hash = '';
+    u.hostname = u.hostname.toLowerCase().replace(/^www\./, '');
+    u.pathname = u.pathname.replace(/\/+$/, '');
+    u.searchParams.sort();
+    return u.toString().toLowerCase();
+  } catch {
+    return String(raw).toLowerCase();
+  }
+}
+
 function describe(job, channels) {
   const where = job.locations?.length ? job.locations.join(' / ') : '?';
   return `[${channels.join('+') || '--'}] ${job.company} — ${job.title}  (${where})  ${job.url}`;
@@ -77,39 +97,91 @@ async function main() {
   const { jobs, failures, sourceCount } = await fetchAll();
   console.log(`${jobs.length} raw postings from ${sourceCount - failures.length}/${sourceCount} feeds`);
 
+  // Individual feeds fail all the time (a company switches ATS) and that is fine.
+  // A third of them failing at once is an outage, and quietly posting the
+  // survivors makes it look like a slow day — the one failure nobody notices.
+  if (failures.length > sourceCount / 3) {
+    throw new Error(
+      `${failures.length}/${sourceCount} feeds failed — treating as an outage rather than a quiet day: ` +
+        failures.map((f) => f.name).join(', ')
+    );
+  }
+
   const cutoff = Math.floor(Date.now() / 1000) - MAX_AGE_DAYS * 86400;
   const seen = loadSeen();
   const seenSet = new Set(seen);
 
-  // The same role reaches us from several feeds (Simplify carries the ATS link
-  // for boards we also poll directly), so collapse on company+title before the
-  // seen-check or one posting fires twice.
-  const dedup = new Map();
+  // The same role reaches us from several feeds, so it has to be collapsed before
+  // the seen-check or one posting fires twice. TWO keys are needed:
+  //
+  //  - by URL, because Simplify rewrites titles. Notion's board says "Software
+  //    Engineer, Early Career (AI)" while Simplify calls the very same posting
+  //    "Software Engineer – Early Career - AI". Same apply URL, so company+title
+  //    alone lets both through.
+  //  - by company+title, because one opening is often listed once per location
+  //    with a distinct URL each time (Stripe posts six identical "Software
+  //    Engineer, New Grad" reqs; Palantir four).
+  //
+  // Direct ATS feeds are processed first so the company's own wording wins and
+  // the result is deterministic rather than dependent on which fetch finished first.
+  const SOURCE_RANK = { Greenhouse: 0, Ashby: 0, Lever: 0, Workday: 0, Simplify: 1 };
+  const ordered = [...jobs].sort(
+    (a, b) => (SOURCE_RANK[a.source] ?? 9) - (SOURCE_RANK[b.source] ?? 9)
+  );
+
+  const byUrl = new Set();
+  const byTitle = new Set();
   const candidates = [];
-  for (const job of jobs) {
+  for (const job of ordered) {
     // An alert with no apply link is not worth sending, and Slack rejects a
     // button without a url outright — which would lose the whole message.
     if (!job.url || !/^https?:\/\//.test(job.url)) continue;
     if (!isNewGrad(job) || !isSweRole(job)) continue;
     if (job.postedAt && job.postedAt < cutoff) continue;
-    const collapse = `${job.company}|${job.title}`.toLowerCase();
-    if (dedup.has(collapse)) continue;
-    dedup.set(collapse, true);
-    candidates.push(job);
+
+    const channels = channelsFor(job);
+    const urlKey = normalizeUrl(job.url);
+    // The title key is scoped to the destination channel. Large employers open
+    // one requisition PER CITY with the same title — Stripe posts six identical
+    // "Software Engineer, New Grad" reqs — and a channel-blind key collapsed all
+    // six into one, which silently deleted the Toronto req from #canada.
+    // Scoped this way, per-city reqs still collapse within a channel but a role
+    // that reaches a different channel survives.
+    const titleKey = `${job.company}|${job.title}|${channels.join('+')}`.toLowerCase();
+    if (byUrl.has(urlKey) || byTitle.has(titleKey)) continue;
+    byUrl.add(urlKey);
+    byTitle.add(titleKey);
+    candidates.push({ ...job, channels });
   }
 
   const fresh = candidates.filter((j) => !seenSet.has(KEY(j.id)));
+  // A job is deliverable only if it routes to a channel that is actually
+  // configured. If SLACK_CHANNEL_CA is unset or mistyped, Canadian roles are
+  // NOT quietly marked seen — that would suppress them permanently while the
+  // workflow still reported success.
+  // --dry / --bootstrap have no Slack config, so every channel counts as open.
+  const configured = (c) => (live ? Boolean(channels[c]) : true);
   const routed = fresh
-    .map((job) => ({ job, channels: channelsFor(job) }))
+    .map((job) => ({ job, channels: job.channels.filter(configured) }))
     .filter((r) => r.channels.length);
+  const deliverable = new Set(routed.map((r) => r.job.id));
 
   console.log(
-    `${candidates.length} new-grad SWE roles, ${fresh.length} unseen, ${routed.length} in US/CA`
+    `${candidates.length} new-grad SWE roles, ${fresh.length} unseen, ${routed.length} deliverable`
   );
 
-  // Everything considered goes into the seen-set, not just what was posted:
-  // otherwise a later filter tweak turns months of old postings into "new".
-  const nextSeen = seen.concat(candidates.map((j) => KEY(j.id)).filter((k) => !seenSet.has(k)));
+  // Seed everything that was CONSIDERED AND DELIVERABLE. Jobs filtered out for
+  // being outside US/CA are seeded too (they are decided, not pending), but a
+  // job destined for an unconfigured channel is left unseen so it goes out once
+  // the secret is fixed.
+  const seedable = (extraSkip = new Set()) =>
+    seen.concat(
+      candidates
+        .filter((j) => !j.channels.length || (deliverable.has(j.id) && !extraSkip.has(j.id)))
+        .map((j) => KEY(j.id))
+        .filter((k) => !seenSet.has(k))
+    );
+  const nextSeen = seedable();
 
   if (DRY) {
     for (const { job, channels: ch } of routed.slice(0, 40)) console.log('  ' + describe(job, ch));
@@ -143,8 +215,9 @@ async function main() {
   for (const { job, channels: ch } of routed) {
     for (const c of ch) {
       const id = channels[c];
-      if (!id) continue;
-      (byChannel[id] ||= []).push(job);
+      // Both env vars can point at the same channel; don't post the job twice.
+      const arr = (byChannel[id] ||= []);
+      if (!arr.includes(job)) arr.push(job);
     }
   }
 
@@ -154,23 +227,38 @@ async function main() {
     return;
   }
 
-  const sent = await postJobs(token, byChannel);
-  for (const [channel, ok, total] of sent) console.log(`posted ${ok}/${total} to ${channel}`);
+  const { results, failed } = await postJobs(token, byChannel);
+  for (const [channel, ok, total] of results) console.log(`posted ${ok}/${total} to ${channel}`);
 
-  const kept = saveSeen(nextSeen);
+  // A job that failed to post must stay unseen, or it is silently suppressed
+  // forever while the workflow reports success.
+  const kept = saveSeen(seedable(new Set(failed.map((j) => j.id))));
   console.log(`state: ${kept} ids`);
 
   if (failures.length) {
     console.warn(`${failures.length} feed(s) failed: ${failures.map((f) => f.name).join(', ')}`);
   }
+
+  // Fail the workflow when delivery is wholly broken. A failing scheduled run
+  // emails the workflow author — the cheapest possible monitoring, and the only
+  // thing standing between a dead bot and nobody noticing for a month.
+  const [ok, total] = results.reduce(([o, t], [, s, n]) => [o + s, t + n], [0, 0]);
+  if (total && !ok) {
+    throw new Error(`all ${total} posts failed — state not advanced for them`);
+  }
 }
 
+// Only poll when run directly, so the test file can import normalizeUrl and KEY
+// without kicking off a live poll as an import side effect.
+//
 // exitCode rather than process.exit(): forcing exit while fetch's keep-alive
 // sockets are still open trips a libuv assertion on Windows, which buries the
 // actual error message under a stack trace.
-main().catch((e) => {
-  console.error(e.message);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.filename === resolve(process.argv[1])) {
+  main().catch((e) => {
+    console.error(e.message);
+    process.exitCode = 1;
+  });
+}
 
-export { KEY, blocksFor, needsClearance };
+export { KEY };

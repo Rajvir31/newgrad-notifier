@@ -1,7 +1,8 @@
 # NewGradNotifier
 
-New-grad SWE postings pushed to Slack within ~10 minutes of going live.
-44 feeds, two channels (🇺🇸 USA / 🍁 Canada), no duplicates, no email.
+New-grad SWE postings pushed to Slack. 43 company ATS boards are read directly on
+a 10-minute cycle; a 2,800-role aggregator backstops everyone else within the hour.
+Two channels (🇺🇸 USA / 🍁 Canada), no duplicates, no email.
 
 The poller runs on GitHub Actions every 10 minutes, diffs what it finds against a
 committed seen-set, and posts anything new to Slack. There is no server, no
@@ -29,13 +30,18 @@ clickers get an error.
 **2. Channels.** Create `#usa` and `#canada`, then copy each channel ID from
 *View channel details* (bottom of the dialog, `C…`).
 
-**3. Repo secrets.** Settings → Secrets and variables → Actions:
+**3. Repo config.** Settings → Secrets and variables → Actions:
 
-| Secret | Value |
-| --- | --- |
-| `SLACK_BOT_TOKEN` | `xoxb-…` |
-| `SLACK_CHANNEL_US` | `C…` for #usa |
-| `SLACK_CHANNEL_CA` | `C…` for #canada |
+| Where | Name | Value |
+| --- | --- | --- |
+| **Secrets** tab | `SLACK_BOT_TOKEN` | `xoxb-…` |
+| **Variables** tab | `SLACK_CHANNEL_US` | `C…` for #usa |
+| **Variables** tab | `SLACK_CHANNEL_CA` | `C…` for #canada |
+
+The channel IDs go in *Variables*, not Secrets, on purpose: they are not
+sensitive, and Actions masks secret values everywhere they appear, so as secrets
+the logs read `posted 3/3 to ***` — redacting the one field you need when
+delivery breaks.
 
 **4. Make the repo public.** Not optional — 144 runs/day is roughly 4,320 runs a
 month, which blows the 2,000-minute GitHub Free allowance for a private repo.
@@ -108,3 +114,28 @@ rediscovered:
 - **Public repos disable scheduled workflows after 60 days of no activity.**
   It isn't documented whether the bot's own state commits reset that clock, so
   assume not: hit *Run workflow* manually every ~50 days.
+- **A failed Slack post must not be marked seen.** The seed is built from what was
+  actually delivered. Marking a job seen on a failed post suppresses it forever
+  while the workflow still shows a green check — the worst failure mode this
+  thing has, because nobody notices.
+- **Jobs routed to an unconfigured channel stay unseen.** A mistyped
+  `SLACK_CHANNEL_CA` would otherwise silently discard every Canadian role.
+- **A transport error must cost one message, not the batch.** An uncaught `fetch`
+  rejection escaped `Promise.all` and skipped the state save, re-posting
+  everything already delivered on the next run.
+- **The duplicate-collapse key is scoped to the destination channel.** Large
+  employers open one requisition per city with an identical title — Stripe posts
+  six "Software Engineer, New Grad" — and a channel-blind key collapsed all six
+  into one, deleting the Toronto req from #canada.
+- **Simplify rewrites titles.** Notion's board says "Software Engineer, Early
+  Career (AI)"; Simplify calls the same posting "Software Engineer – Early
+  Career - AI". Cross-source dedup has to key on the normalized apply URL, but
+  must keep identifying query params — dropping `?gh_jid=` fuses Stripe's whole
+  board into one job.
+- **`staff` is not a seniority marker on its own.** "Member of Technical Staff"
+  is the standard *entry* title at the AI labs.
+- **A level token only counts at the end of a title.** `/(l|t)[4-9]/` anywhere
+  rejected "Software Engineer, L4 Autonomy Team" and "Perception Engineer - T5".
+- **Total failure has to be loud.** If every post fails, or a third of the feeds
+  fail, the run throws — a failing scheduled workflow emails you, which is the
+  only free monitoring available here.

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { countryOf, channelsFor, isNewGrad, isSweRole, needsClearance } from './filter.js';
-import { blocksFor } from './slack.js';
+import { blocksFor, postJobs } from './slack.js';
 import { relativeToEpoch, splitLocations } from './sources.js';
+import { normalizeUrl } from './poll.js';
 
 // Country routing — every entry here is a trap that bit a naive implementation.
 for (const [loc, want] of [
@@ -53,6 +54,21 @@ for (const [title, want] of [
   ['AI Trainer - Freelance', false],   // data-labelling gig spam
   ['Part-Time Data Annotator', false],
   ['Software Engineer, 10+ years experience', false],
+  // "Member of Technical Staff" is the standard ENTRY title at the AI labs;
+  // a bare \bstaff\b rejected exactly the roles this is meant to catch.
+  ['Member of Technical Staff, New Grad', true],
+  ['Staff Software Engineer', false],
+  ['Staff Engineer', false],
+  // A level token only counts at the end of a title — otherwise it is a team
+  // or product name.
+  ['Software Engineer, L4 Autonomy Team', true],
+  ['Perception Engineer - T5 Stack', true],
+  ['Software Engineer L5', false],
+  ['Software Engineer (L6)', false],
+  ['Software Engineer, Level 5', false],
+  // Season/year appears in both orders in real postings.
+  ['SWE Intern - Summer 2027', false],
+  ['SWE Intern - 2027 Summer', false],
 ]) {
   assert.equal(isNewGrad({ title, newGradScoped: true }), want, `scoped isNewGrad(${JSON.stringify(title)})`);
 }
@@ -96,6 +112,12 @@ assert.equal(isSweRole({ title: 'Mechanical Design Engineer' }), false);
 assert.deepEqual(channelsFor({ country: 'CA', locations: ['Seattle, WA'] }), ['CA']);
 assert.deepEqual(channelsFor({ country: '', locations: ['Toronto, ON, Canada'] }), ['CA']);
 assert.deepEqual(channelsFor({ country: undefined, locations: ['Austin, TX'] }), ['US']);
+
+// countryOf can only name one country, so a dual-eligible string used to resolve
+// to CA alone and never reach #usa.
+assert.deepEqual(channelsFor({ locations: ['Remote - US or Canada'] }), ['US', 'CA']);
+assert.deepEqual(channelsFor({ locations: ['Remote (United States | Canada)'] }), ['US', 'CA']);
+assert.deepEqual(channelsFor({ locations: ['Toronto, ON, Canada'] }), ['CA']);
 
 assert.equal(needsClearance({ title: 'Developer - Active TS/SCI with Poly' }), true);
 assert.equal(needsClearance({ title: 'Developer' }), false);
@@ -153,5 +175,83 @@ assert.deepEqual(splitLocations('Calgary, Canada; Edmonton, Canada'), ['Calgary,
 assert.deepEqual(splitLocations('Toronto, ON'), ['Toronto, ON']);
 assert.deepEqual(splitLocations(''), []);
 assert.deepEqual(splitLocations(undefined), []);
+
+// --- URL normalization (cross-source dedup) --------------------------------
+// Simplify rewrites titles, so the apply URL is the only thing tying its copy of
+// a posting to the company's own board. These are the exact strings that made
+// Notion's "Software Engineer, Early Career (AI)" fire twice.
+{
+  const same = (a, b, msg) => assert.equal(normalizeUrl(a), normalizeUrl(b), msg);
+  const differ = (a, b, msg) => assert.notEqual(normalizeUrl(a), normalizeUrl(b), msg);
+
+  same(
+    'https://jobs.ashbyhq.com/notion/85947779/application?embed=true',
+    'https://jobs.ashbyhq.com/notion/85947779/application',
+    'Simplify appends ?embed=true to the same posting'
+  );
+  same(
+    'https://job-boards.greenhouse.io/x/jobs/1?t=1&gh_src=abc',
+    'https://job-boards.greenhouse.io/x/jobs/1',
+    'greenhouse tracking params are not identity'
+  );
+  same('https://WWW.Example.com/job/1/', 'https://example.com/job/1', 'host case, www, trailing slash');
+  same('https://example.com/j?a=1&b=2', 'https://example.com/j?b=2&a=1', 'param order is not identity');
+
+  // gh_jid IS identity: Stripe's absolute_url is the same search page for every
+  // req, so dropping it would fuse the entire board into one job.
+  differ(
+    'https://stripe.com/jobs/search?gh_jid=8130930',
+    'https://stripe.com/jobs/search?gh_jid=8130881',
+    'gh_jid distinguishes Stripe reqs and must survive normalization'
+  );
+  // Must never throw on junk.
+  assert.equal(normalizeUrl('not a url'), 'not a url');
+}
+
+// --- Delivery failure handling ---------------------------------------------
+// The worst failure this system has: a job that failed to post gets marked seen,
+// is never retried, and the workflow still reports success. These stub fetch to
+// prove postJobs reports back exactly what did not get through.
+{
+  const job = (id) => ({
+    id,
+    company: 'Acme',
+    title: `Engineer ${id}`,
+    locations: ['Austin, TX'],
+    url: `https://example.com/${id}`,
+    postedAt: 1788484604,
+    source: 'Greenhouse',
+  });
+  const realFetch = globalThis.fetch;
+  const stub = (body, status = 200) => {
+    globalThis.fetch = async () => ({
+      status,
+      headers: new Map(),
+      json: async () => body,
+    });
+  };
+
+  // Slack's signature trap: HTTP 200 with ok:false. Must count as failure.
+  stub({ ok: false, error: 'not_in_channel' });
+  let r = await postJobs('xoxb-x', { C_CA: [job('a'), job('b')] });
+  assert.deepEqual(r.results, [['C_CA', 0, 2]], 'HTTP 200 + ok:false is a failure, not a success');
+  assert.deepEqual(r.failed.map((j) => j.id), ['a', 'b'], 'failed jobs must be reported back');
+
+  // A transport error must cost one message, not reject the whole batch —
+  // an escaping rejection used to skip the state save and re-post everything.
+  globalThis.fetch = async () => {
+    throw new Error('ECONNRESET');
+  };
+  r = await postJobs('xoxb-x', { C_US: [job('c')] });
+  assert.deepEqual(r.results, [['C_US', 0, 1]], 'a socket error must not reject postJobs');
+  assert.deepEqual(r.failed.map((j) => j.id), ['c']);
+
+  stub({ ok: true, ts: '1.2' });
+  r = await postJobs('xoxb-x', { C_US: [job('d')] });
+  assert.deepEqual(r.results, [['C_US', 1, 1]]);
+  assert.deepEqual(r.failed, [], 'a successful post reports nothing failed');
+
+  globalThis.fetch = realFetch;
+}
 
 console.log('all assertions passed');

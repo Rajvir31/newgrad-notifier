@@ -38,8 +38,12 @@ jobs:
       - run: node src/poll.js
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_US: ${{ secrets.SLACK_CHANNEL_US }}
-          SLACK_CHANNEL_CA: ${{ secrets.SLACK_CHANNEL_CA }}
+          # Variables, not secrets. Channel IDs are not sensitive (they appear in
+          # every message permalink), and Actions masks secret values everywhere
+          # they occur — so as secrets the logs read "posted 3/3 to ***", redacting
+          # exactly the field you need when delivery breaks.
+          SLACK_CHANNEL_US: ${{ vars.SLACK_CHANNEL_US }}
+          SLACK_CHANNEL_CA: ${{ vars.SLACK_CHANNEL_CA }}
 
       - name: Commit seen-state
         run: |

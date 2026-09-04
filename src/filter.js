@@ -3,13 +3,24 @@
 
 // --- Role level ------------------------------------------------------------
 
-// Seniority markers. Numeric levels must follow a role noun so "Java 8 Developer"
-// and "Python 3 Engineer" are not mistaken for level-8 roles.
+// Seniority markers.
+//
+// `staff` is deliberately narrow: "Member of Technical Staff" is the standard
+// ENTRY title at the AI labs, so a bare \bstaff\b rejects exactly the roles this
+// exists to find.
+//
+// A numeric level must either follow a role noun ("Engineer II" — which also
+// keeps "Java 8 Developer" and "Python 3 Engineer" out of it) or END the title
+// ("Software Engineer L5"). A free-floating /(l|t)[4-9]/ rejected "Software
+// Engineer, L4 Autonomy Team" and "Perception Engineer - T5 Stack", where the
+// token names a team or product; bare `t` is too ambiguous to match at all.
 const SENIOR =
-  /\b(senior|sr\.?|staff|principal|lead(?!\s*generation)|manager|director|head\s+of|architect|distinguished|fellow|vp|president|executive|leader)\b|\b(engineer|developer|analyst|scientist|programmer|consultant)\s*(ii+|iv|vi*|[2-9])\b|\b(l|level|t)[- ]?[4-9]\b|\b\d{2,}\+?\s*years?\b/i;
+  /\b(senior|sr\.?|principal|lead(?!\s*generation)|manager|director|head\s+of|architect|distinguished|fellow|vp|president|executive|leader)\b|\bstaff\s+(software\s+)?(engineer|developer|scientist|researcher)\b|\b(engineer|developer|analyst|scientist|programmer|consultant)\s*(ii+|iv|vi*|[2-9])\b|\b(l|level)[- ]?[4-9]\)?\s*$|\b\d{2,}\+?\s*years?\b/i;
 
+// The season/year clause is order-agnostic: real titles carry both
+// "Summer 2027" and "2027 Summer".
 const INTERN =
-  /\b(intern(ship)?s?|co[\s-]?op|placement\s*(year|student)|summer\s*20\d\d|winter\s*20\d\d|fall\s*20\d\d|spring\s*20\d\d|apprentice(ship)?|working\s*student|praktikum|student\s*(worker|assistant|position)|undergraduate\s*research)\b/i;
+  /\b(intern(ship)?s?|co[\s-]?op|placement\s*(year|student)|(summer|winter|fall|spring)\s*20\d\d|20\d\d\s*(summer|winter|fall|spring)|apprentice(ship)?|working\s*student|praktikum|student\s*(worker|assistant|position)|undergraduate\s*research)\b/i;
 
 // Gig/data-labelling spam that floods entry-level feeds.
 const GIG =
@@ -98,6 +109,15 @@ export function countryOf(location = '') {
 // fall through to the location strings rather than routing the job nowhere.
 export function channelsFor(job) {
   if (job.country === 'US' || job.country === 'CA') return [job.country];
-  const seen = new Set((job.locations || []).map(countryOf));
+  const locs = job.locations || [];
+  const seen = new Set(locs.map(countryOf));
+  // countryOf returns a single country, so "Remote - US or Canada" resolves to
+  // CA alone and never reaches #usa. Dual-eligible strings belong in both.
+  for (const l of locs) {
+    if (/\bcanada\b/i.test(l) && /\b(u\.?s\.?a?\.?|united states|america)\b/i.test(l)) {
+      seen.add('US');
+      seen.add('CA');
+    }
+  }
   return ['US', 'CA'].filter((c) => seen.has(c));
 }

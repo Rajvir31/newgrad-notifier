@@ -89,7 +89,15 @@ export function blocksFor(job) {
 
 async function postOne(token, channel, job) {
   for (let attempt = 0; attempt < 4; attempt++) {
-    const r = await call('chat.postMessage', token, { channel, ...blocksFor(job) });
+    // A transport error (ECONNRESET, DNS, TLS) must cost one message, not the
+    // whole batch: an uncaught reject here would escape Promise.all and skip
+    // the state save, re-posting everything already delivered on the next run.
+    const r = await call('chat.postMessage', token, { channel, ...blocksFor(job) }).catch((e) => ({
+      ok: false,
+      error: `network: ${e.message}`,
+      status: 0,
+      retryAfter: 0,
+    }));
     if (r.ok) return true;
     if (r.status === 429 || r.error === 'ratelimited') {
       // Sleep exactly what Slack asks for — guessing is how you get throttled twice.
@@ -100,6 +108,9 @@ async function postOne(token, channel, job) {
     console.error(`  slack ${channel}: ${r.error} for ${job.company} — ${job.title}`);
     return false;
   }
+  // Rate-limited out of retries. Logged so both failure paths are greppable —
+  // this one used to drop a job with no record of which one.
+  console.error(`  slack ${channel}: gave up after 4 attempts for ${job.company} — ${job.title}`);
   return false;
 }
 
@@ -108,17 +119,23 @@ async function postOne(token, channel, job) {
  * One message per job rather than a digest: each role gets its own Apply button,
  * its own thread, and its own "I applied" reaction. (A digest also caps out —
  * 50 blocks per message means 12 jobs at 4 blocks each.)
+ *
+ * Returns { results, failed } where `failed` holds the jobs that did NOT get
+ * through. The caller must keep those out of the seen-set, or a job that failed
+ * to post is marked as delivered and never announced.
  */
 export async function postJobs(token, byChannel) {
+  const failed = [];
   const results = await Promise.all(
     Object.entries(byChannel).map(async ([channel, jobs]) => {
       let sent = 0;
       for (const [i, job] of jobs.entries()) {
         if (i) await sleep(PACE_MS);
         if (await postOne(token, channel, job)) sent++;
+        else failed.push(job);
       }
       return [channel, sent, jobs.length];
     })
   );
-  return results;
+  return { results, failed };
 }
