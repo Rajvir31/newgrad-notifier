@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New-grad board</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎯</text></svg>">
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --line: #e3e6ea;
+    --ink: #0d1117; --dim: #57606a; --accent: #2563eb; --on-accent: #fff;
+    --good: #16794a; --on-good: #ffffff; --warn: #9a6700; --ca: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10; --panel: #14171c; --line: #262b33;
+      --ink: #e8ecf1; --dim: #97a1af; --accent: #4c8dff; --on-accent: #06101f;
+      --good: #4ade80; --on-good: #06210f; --warn: #e3b341; --ca: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px 80px; }
+
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    border-bottom: 1px solid var(--line); padding: 14px 0 12px; margin-bottom: 18px;
+  }
+  .titlebar { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  .meta { color: var(--dim); font-size: 13px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input[type=search], select {
+    font: inherit; font-size: 14px; color: var(--ink); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+  }
+  input[type=search] { flex: 1 1 220px; min-width: 160px; }
+  button {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: var(--on-accent);
+    border: 0; border-radius: 8px; padding: 8px 14px;
+  }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: .55; cursor: default; }
+  label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--dim); }
+
+  ol { list-style: none; margin: 0; padding: 0; }
+  li.role {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: start;
+    padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
+    background: var(--panel);
+  }
+  li.role.done { opacity: .45; }
+  .role .head { grid-column: 1; font-weight: 600; }
+  .role .co { color: var(--accent); }
+  .role .sub { grid-column: 1; color: var(--dim); font-size: 13px; }
+  .role .side { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 6px; width: 104px; }
+  .role .side a {
+    text-decoration: none; text-align: center; font-size: 13px; font-weight: 600;
+    background: var(--good); color: var(--on-good); border-radius: 7px; padding: 6px 14px; white-space: nowrap;
+  }
+  .role .side button { font-size: 12px; padding: 5px 10px; }
+
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .03em;
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; margin-left: 6px;
+    color: var(--dim); vertical-align: 1px;
+  }
+  .tag.ca { color: var(--ca); border-color: currentColor; }
+  .tag.clr { color: var(--warn); border-color: currentColor; }
+
+  .empty { color: var(--dim); padding: 48px 0; text-align: center; }
+  .fail { color: var(--warn); font-size: 13px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="titlebar">
+      <h1>New-grad board</h1>
+      <span class="meta" id="meta">loading…</span>
+    </div>
+    <div class="controls">
+      <input type="search" id="q" placeholder="Search title, company, location…" autocomplete="off">
+      <select id="country">
+        <option value="">US + Canada</option>
+        <option value="US">US only</option>
+        <option value="CA">Canada only</option>
+      </select>
+      <select id="age">
+        <option value="1">Last 24 hours</option>
+        <option value="3">Last 3 days</option>
+        <option value="7" selected>Last week</option>
+        <option value="14">Last 2 weeks</option>
+        <option value="0">Everything</option>
+      </select>
+      <select id="source"><option value="">All sources</option></select>
+      <label class="check"><input type="checkbox" id="hideDone" checked> Hide applied</label>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="fail" id="fail" hidden></div>
+  </header>
+
+  <ol id="list"></ol>
+  <div class="empty" id="empty" hidden></div>
+
+</div>
+<script>
+// Feed data is untrusted: every value below goes in via textContent or a typed
+// property, never innerHTML, so a job title cannot inject markup.
+const $ = (id) => document.getElementById(id);
+const list = $('list');
+
+const STORE = 'newgrad.applied';
+const applied = new Set(read());
+function read() {
+  try { return JSON.parse(localStorage.getItem(STORE)) || []; } catch { return []; }
+}
+function persist() {
+  try { localStorage.setItem(STORE, JSON.stringify([...applied])); } catch {}
+}
+
+let data = { roles: [], fetchedAt: 0, failures: [] };
+
+function el(tag, props, kids) {
+  const n = Object.assign(document.createElement(tag), props || {});
+  for (const k of kids || []) n.append(k);
+  return n;
+}
+
+// Only http(s) is clickable. Anything else (javascript:, data:, blob:) becomes an
+// inert placeholder rather than a link the browser will happily execute.
+function safeUrl(u) {
+  try {
+    const parsed = new URL(u, location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : 'about:blank';
+  } catch {
+    return 'about:blank';
+  }
+}
+
+function ago(epoch) {
+  if (!epoch) return 'date unknown';
+  const mins = Math.floor((Date.now() / 1000 - epoch) / 60);
+  if (mins < 60) return mins <= 1 ? 'just now' : mins + 'm ago';
+  const h = Math.floor(mins / 60);
+  if (h < 24) return h + 'h ago';
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'yesterday' : d + 'd ago';
+}
+
+function visible() {
+  const q = $('q').value.trim().toLowerCase();
+  const country = $('country').value;
+  const days = Number($('age').value);
+  const src = $('source').value;
+  const hide = $('hideDone').checked;
+  const cutoff = days ? Date.now() / 1000 - days * 86400 : 0;
+
+  return data.roles.filter((r) => {
+    if (hide && applied.has(r.id)) return false;
+    if (country && !r.channels.includes(country)) return false;
+    if (src && r.source !== src) return false;
+    // Keep undated roles rather than hiding them behind a date filter.
+    if (cutoff && r.postedAt && r.postedAt < cutoff) return false;
+    if (!q) return true;
+    return (r.title + ' ' + r.company + ' ' + r.locations.join(' ')).toLowerCase().includes(q);
+  });
+}
+
+function row(r) {
+  const done = applied.has(r.id);
+
+  const head = el('div', { className: 'head' }, [
+    el('span', { className: 'co', textContent: r.company }),
+    document.createTextNode(' — '),
+    el('span', { textContent: r.title }),
+  ]);
+  for (const c of r.channels) {
+    head.append(el('span', { className: 'tag' + (c === 'CA' ? ' ca' : ''), textContent: c }));
+  }
+  if (r.clearance) head.append(el('span', { className: 'tag clr', textContent: 'CLEARANCE' }));
+
+  const where = r.locations.length ? r.locations.join(' · ') : 'Location not listed';
+  const sub = el('div', { className: 'sub', textContent: `${where}  ·  ${ago(r.postedAt)}  ·  via ${r.source}` });
+
+  const apply = el('a', { textContent: 'Apply', target: '_blank', rel: 'noopener noreferrer' });
+  // Assigning .href does NOT neutralize a javascript: URL — it stays executable
+  // on click. Apply URLs come from third-party boards, so the scheme is checked
+  // here as well as server-side before the link is made clickable at all.
+  apply.href = safeUrl(r.url);
+  const mark = el('button', { className: 'ghost', textContent: done ? 'Undo' : 'Applied' });
+  mark.onclick = () => {
+    applied.has(r.id) ? applied.delete(r.id) : applied.add(r.id);
+    persist();
+    render();
+  };
+
+  return el('li', { className: 'role' + (done ? ' done' : '') }, [
+    head, sub, el('div', { className: 'side' }, [apply, mark]),
+  ]);
+}
+
+function render() {
+  const rows = visible();
+  list.replaceChildren(...rows.map(row));
+  $('empty').hidden = rows.length > 0;
+  $('empty').textContent = data.roles.length
+    ? 'Nothing matches those filters.'
+    : 'No roles loaded yet.';
+
+  const when = data.fetchedAt ? ago(data.fetchedAt) : '—';
+  $('meta').replaceChildren(
+    el('b', { textContent: String(rows.length) }),
+    document.createTextNode(` of ${data.roles.length} roles · ${applied.size} applied · updated ${when}`)
+  );
+
+  const f = $('fail');
+  f.hidden = !data.failures?.length;
+  if (data.failures?.length) f.textContent = `${data.failures.length} feed(s) down: ${data.failures.join(', ')}`;
+}
+
+async function load(force) {
+  const btn = $('refresh');
+  btn.disabled = true;
+  btn.textContent = force ? 'Fetching…' : 'Loading…';
+  try {
+    const res = await fetch('/api/jobs' + (force ? '?refresh=1' : ''));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+    render();
+  } catch (e) {
+    $('fail').hidden = false;
+    $('fail').textContent = 'Could not load: ' + e.message + ' — is `npm run ui` still running?';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+  }
+}
+
+for (const id of ['q', 'country', 'age', 'source', 'hideDone']) {
+  $(id).addEventListener('input', render);
+}
+$('refresh').onclick = () => load(true);
+
+// `/` focuses search, the way every job board should behave.
+addEventListener('keydown', (e) => {
+  if (e.key === '/' && document.activeElement !== $('q')) { e.preventDefault(); $('q').focus(); }
+  if (e.key === 'Escape' && document.activeElement === $('q')) { $('q').value = ''; render(); }
+});
+
+load(false).then(() => {
+  const sources = [...new Set(data.roles.map((r) => r.source))].sort();
+  for (const s of sources) $('source').append(el('option', { value: s, textContent: s }));
+});
+</script>
+</body>
+</html>

@@ -13,8 +13,27 @@ src/sources.js   fetch + normalize every feed
 src/filter.js    is it new-grad? is it SWE? which channel?
 src/slack.js     Block Kit + rate-limited delivery
 src/poll.js      orchestration + seen-state
+src/ui.js        local dashboard server
+public/app.html  the dashboard itself
 src/test.js      self-check (node src/test.js)
 ```
+
+## Just want to browse the jobs?
+
+```bash
+npm run ui        # http://localhost:8787, opens your browser
+```
+
+No Slack, no secrets, no setup — it fetches all 44 feeds and gives you a local
+board: search, filter by US/Canada, filter by age and source, and mark roles as
+applied (kept in the browser, so it survives reloads). Refresh re-polls.
+
+Served over HTTP rather than opened as a `file://` page because Chrome gives
+`file://` an opaque origin where `localStorage` throws — and `localStorage` is
+what remembers what you have applied to.
+
+The Slack setup below is only needed if you want to be *pushed* new roles rather
+than checking the board yourself.
 
 ## Setup
 
@@ -75,7 +94,8 @@ redirect means rotating it without touching the page.
   `MAX_BURST` (if a poll finds more than this, seed instead of posting — a feed
   changing shape should not spam the channel), `MAX_SEEN` in `src/poll.js`.
 
-Current volume: ~11k postings scanned per poll, ~27 new-grad SWE roles per day.
+Current volume: ~10k postings scanned per poll in about 4 seconds, ~1,500 open
+new-grad SWE roles in US/Canada, of which ~30 a day are new.
 
 ## Notes from building this
 
@@ -136,6 +156,16 @@ rediscovered:
   is the standard *entry* title at the AI labs.
 - **A level token only counts at the end of a title.** `/(l|t)[4-9]/` anywhere
   rejected "Software Engineer, L4 Autonomy Team" and "Perception Engineer - T5".
+- **A category tag is not enough on its own.** The aggregator files "Patient
+  Coordinator" and "Dental Assistant" under `category: "Software"`, so there is
+  an explicit non-technical blocklist. It is a blocklist rather than a
+  requirement that every title contain an engineering noun, because that
+  requirement also rejects real postings like "Software Development Graduate".
+  `server` and `warehouse` are deliberately NOT on it — they would eat
+  "SQL Server Developer" and "Data Warehouse Software Engineer".
+- **Assigning `.href` does not neutralize a `javascript:` URL.** Apply links come
+  from third-party boards; the UI checks the scheme before making one clickable,
+  and the poller drops non-http(s) URLs before that.
 - **Total failure has to be loud.** If every post fails, or a third of the feeds
   fail, the run throws — a failing scheduled workflow emails you, which is the
   only free monitoring available here.

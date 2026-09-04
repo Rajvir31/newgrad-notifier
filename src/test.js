@@ -107,6 +107,18 @@ assert.equal(isSweRole({ title: 'Safety & Security Counsel' }), false);
 assert.equal(isSweRole({ title: 'Designer, Web, Presence & Platform' }), false);
 assert.equal(isSweRole({ title: 'Mechanical Design Engineer' }), false);
 
+// The aggregator files plainly non-software roles under a technical category,
+// so a category match alone is not enough.
+assert.equal(isSweRole({ title: 'Patient Coordinator', category: 'Software' }), false);
+assert.equal(isSweRole({ title: 'Dental Assistant', category: 'AI/ML/Data' }), false);
+assert.equal(isSweRole({ title: 'Born Digital Aide', category: 'Software' }), false);
+assert.equal(isSweRole({ title: 'AI Model Policy Trainer', category: 'AI/ML/Data' }), false);
+// ...but the blocklist must not eat real engineering titles that happen to
+// contain one of those words as a technical term.
+assert.equal(isSweRole({ title: 'Data Warehouse Software Engineer', category: 'Software' }), true);
+assert.equal(isSweRole({ title: 'SQL Server Developer', category: 'Software' }), true);
+assert.equal(isSweRole({ title: 'Software Development Graduate - AI', category: 'Software' }), true);
+
 // Structured country hints beat location strings, but only when populated —
 // Ashby ships addressCountry as "" on real Canada-eligible postings.
 assert.deepEqual(channelsFor({ country: 'CA', locations: ['Seattle, WA'] }), ['CA']);
@@ -287,6 +299,20 @@ assert.deepEqual(splitLocations(undefined), []);
   c = collapse([gh, ghToronto]);
   assert.equal(c.length, 2, 'same-title reqs in different channels are different jobs');
   assert.deepEqual(c.map((j) => j.channels), [['US'], ['CA']]);
+
+  // Apply URLs come from third-party boards. Anything that is not http(s) is
+  // dropped here, before it can reach a Slack button or the local UI.
+  for (const url of [
+    'javascript:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'vbscript:msgbox(1)',
+    'ftp://example.com/job',
+    '',
+    null,
+  ]) {
+    assert.deepEqual(collapse([{ ...gh, url }]), [], `must drop url ${JSON.stringify(url)}`);
+  }
+  assert.equal(collapse([gh]).length, 1, 'an ordinary https url still passes');
 
   // Feed flap: whichever feed is up, the role is announced exactly once, ever.
   const seenSet = new Set();

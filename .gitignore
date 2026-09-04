@@ -1,3 +1,6 @@
 node_modules/
 .env
 *.local
+
+# UI snapshot cache — regenerated on demand, unlike data/seen.json which is state
+data/jobs.json

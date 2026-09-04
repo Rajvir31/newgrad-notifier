@@ -57,9 +57,22 @@ export function isNewGrad(job) {
   return job.newGradScoped === true || NEW_GRAD.test(t);
 }
 
+// Clearly-not-software roles that the aggregator still files under a technical
+// category — "Patient Coordinator" and "Dental Assistant" both arrive tagged
+// "Software". This is a blocklist rather than a requirement that every title
+// contain an engineering noun, because that requirement also rejects real
+// postings like "Software Development Graduate - AI" and "Data & Analytics
+// Graduate Scheme", and missing a real job is the one unacceptable failure.
+// `server` and `warehouse` are deliberately absent: they collide with "SQL Server
+// Developer" and "Data Warehouse Software Engineer". Letting a stray "Banquet
+// Server" through is far cheaper than dropping a real engineering role.
+const NON_TECH =
+  /\b(patient|dental|dentist|hygienist|nurse|nursing|caregiver|therapist|therapy|clinical\s*assistant|phlebotom|veterinar|pharmac|medical\s*assistant|receptionist|coordinator|concierge|clerk|cashier|barista|waiter|janitor|custodian|courier|forklift|teacher|tutor|trainer|paralegal|attorney|counsel|recruiter|accountant|bookkeeper|realtor|aide|orderly|groundskeeper|housekeep|security\s*guard|lifeguard)\b/i;
+
 export function isSweRole(job, { categories = DEFAULT_CATEGORIES } = {}) {
-  if (job.category && categories.test(job.category)) return true;
   const t = job.title || '';
+  if (NON_TECH.test(t)) return false;
+  if (job.category && categories.test(job.category)) return true;
   return ENG_NOUN.test(t) && SWE_DOMAIN.test(t);
 }
 
