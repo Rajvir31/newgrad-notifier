@@ -2,11 +2,14 @@ name: poll-jobs
 
 on:
   schedule:
-    # Every 10 minutes. GitHub's floor is 5, so this has margin — but scheduled
-    # runs are explicitly best-effort ("can be delayed during periods of high
-    # loads ... some queued jobs may be dropped"), and the :00 slot is the worst
-    # one to ask for. Starting at :03 dodges the top-of-hour pile-up.
-    - cron: '3-59/10 * * * *'
+    # Every 10 minutes, off the top of the hour: GitHub's own docs warn that
+    # schedules "can be delayed during periods of high loads" and that ":00" is
+    # the most contended slot, so this asks for :05, :15, :25...
+    #
+    # Written as an explicit list rather than the equivalent `5-59/10`. Both are
+    # valid cron, but a plain list leaves nothing for a parser to disagree about,
+    # and this repo's first schedule did not fire for over an hour.
+    - cron: '5,15,25,35,45,55 * * * *'
   workflow_dispatch: # manual kick — and it counts as repo activity, see below
 
 # THE REPO MUST BE PUBLIC. 144 runs/day is ~4,320 runs a month; even at 30s each
