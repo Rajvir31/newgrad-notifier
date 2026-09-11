@@ -43,6 +43,14 @@ export const BOARDS = {
     gitlab: 'GitLab', affirm: 'Affirm', asana: 'Asana', figma: 'Figma',
     instacart: 'Instacart', duolingo: 'Duolingo', discord: 'Discord',
     airtable: 'Airtable', sigmacomputing: 'Sigma Computing',
+    // Added from the aggregator: every token below was read out of a Simplify
+    // posting URL, so each is a board already supplying new-grad SWE roles —
+    // just days late. See "An aggregator surfaces old postings as new".
+    spacex: 'SpaceX', andurilindustries: 'Anduril', xai: 'xAI',
+    trueanomalyinc: 'True Anomaly', imc: 'IMC Trading', torcrobotics: 'Torc Robotics',
+    truveta: 'Truveta', newsbreak: 'NewsBreak', simplisafe: 'SimpliSafe',
+    accenturefederalservices: 'Accenture Federal', darkwolfsolutions: 'Dark Wolf Solutions',
+    pmg: 'PMG',
     // Canada-heavy
     faire: 'Faire', ada18: 'Ada', hootsuite: 'Hootsuite', shakepay: 'Shakepay',
   },
@@ -50,16 +58,24 @@ export const BOARDS = {
   ashby: {
     openai: 'OpenAI', ramp: 'Ramp', notion: 'Notion', cursor: 'Cursor',
     linear: 'Linear', sierra: 'Sierra', harvey: 'Harvey', abridge: 'Abridge',
+    applied: 'Applied Intuition', cerebras: 'Cerebras', zip: 'Zip',
+    'retell-ai': 'Retell AI', 'allen-control-systems': 'Allen Control Systems',
+    netic: 'Cybernetic Labs', ellipsislabs: 'Ellipsis Labs', realmalliance: 'Realm',
+    glide: 'Glide', Lightfield: 'Lightfield',
     // Canada-heavy
     cohere: 'Cohere', wealthsimple: 'Wealthsimple', '1password': '1Password',
     jobber: 'Jobber',
   },
   // Lever slug -> company label. Lever's public footprint is far thinner than its
   // reputation (only 3 of 22 well-known slugs resolve) and it cannot suppress
-  // descriptions, so each of these fetches is megabytes.
+  // descriptions, so each of these fetches is megabytes — which is now partly a
+  // feature, since the US eligibility gate needs that text and Lever hands it
+  // over without a second request.
   lever: {
     palantir: 'Palantir', spotify: 'Spotify', matchgroup: 'Match Group',
     pointclickcare: 'PointClickCare',
+    veeva: 'Veeva Systems', 'field-ai': 'Field AI', wyetechllc: 'Wyetech',
+    glsllc: 'Global Lending Services', hatchit: 'Hatch IT', datalabusa: 'Datalab USA',
   },
   // SmartRecruiters is deliberately absent. It was polled (ServiceNow, Ubisoft,
   // Bosch) and yielded zero new-grad SWE roles across 1,255 postings, and its
@@ -80,6 +96,26 @@ export const BOARDS = {
     // 24 of 24 in Canada), so the page budget is spent before a software role
     // can appear. Searched, it is the same shape as the other three.
     { company: 'CIBC', host: 'cibc.wd3.myworkdayjobs.com', tenant: 'cibc', site: 'campus', facet: 'Country', search: 'software' },
+    // Added from the aggregator. The country facet NAME was read from each
+    // board's own facet list rather than guessed — it differs per tenant
+    // (Location_Country / Country / Country___Territory / a Salesforce custom
+    // field), and a wrong one is a hard HTTP 400.
+    //
+    // Tenants WITHOUT a country facet are deliberately absent. They can be
+    // polled with `searchText` alone, but the newest 20 then come from
+    // anywhere: NVIDIA's are all Israel and Mastercard's are Dublin/Pune, so
+    // the page budget is spent before a US/Canada role appears. That is the
+    // same failure the search term fixes for the banks above.
+    { company: 'General Motors', host: 'generalmotors.wd5.myworkdayjobs.com', tenant: 'generalmotors', site: 'Careers_GM', facet: 'Location_Country', search: 'software' },
+    { company: 'Salesforce', host: 'salesforce.wd12.myworkdayjobs.com', tenant: 'salesforce', site: 'External_Career_Site', facet: 'CF_-_REC_-_LRV_-_Job_Posting_Anchor_-_Country_from_Job_Posting_Location_Extended', search: 'software' },
+    { company: 'Cadence Design Systems', host: 'cadence.wd1.myworkdayjobs.com', tenant: 'cadence', site: 'External_Careers', facet: 'Location_Country', search: 'software' },
+    { company: 'KLA', host: 'kla.wd1.myworkdayjobs.com', tenant: 'kla', site: 'Search', facet: 'Country', search: 'software' },
+    { company: 'LexisNexis Risk Solutions', host: 'relx.wd3.myworkdayjobs.com', tenant: 'relx', site: 'RiskSolutions', facet: 'Country___Territory', search: 'software' },
+    { company: 'Ciena', host: 'ciena.wd5.myworkdayjobs.com', tenant: 'ciena', site: 'Careers', facet: 'Location_Country', search: 'software' },
+    { company: 'NCR Voyix', host: 'ncr.wd1.myworkdayjobs.com', tenant: 'ncr', site: 'ext_us', facet: 'Location_Country', search: 'software' },
+    { company: 'Stryker', host: 'stryker.wd1.myworkdayjobs.com', tenant: 'stryker', site: 'StrykerCareers', facet: 'Location_Country', search: 'software' },
+    { company: 'HP', host: 'hp.wd5.myworkdayjobs.com', tenant: 'hp', site: 'EXTEU-AC-CareerSite', facet: 'Location_Country', search: 'software' },
+    { company: 'Cigna Group', host: 'cigna.wd5.myworkdayjobs.com', tenant: 'cigna', site: 'cignacareers', facet: 'Location_Country', search: 'software' },
   ],
 };
 

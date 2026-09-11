@@ -1,6 +1,6 @@
 # NewGradNotifier
 
-New-grad SWE postings pushed to Slack. 43 company ATS boards are read directly on
+New-grad SWE postings pushed to Slack. 81 company ATS boards are read directly on
 a 10-minute cycle; a 2,800-role aggregator backstops everyone else within the hour.
 Two channels (🇺🇸 USA / 🍁 Canada), no duplicates, no email.
 
@@ -26,7 +26,7 @@ src/test.js      self-check (node src/test.js)
 npm run ui        # http://localhost:8787, opens your browser
 ```
 
-No Slack, no secrets, no setup — it fetches all 44 feeds and gives you a local
+No Slack, no secrets, no setup — it fetches all 82 feeds and gives you a local
 board: search, filter by US/Canada, filter by age and source, and mark roles as
 applied (kept in the browser, so it survives reloads). Refresh re-polls.
 
@@ -249,6 +249,12 @@ parses ~10 MB of JSON. Vercel Hobby cron cannot do sub-daily intervals at all.
 - **Companies polled directly** — `BOARDS` at the top of `src/sources.js`.
   Find a board token by loading the company's careers page and grepping for
   `greenhouse.io/<token>`, `jobs.ashbyhq.com/<org>`, `jobs.lever.co/<slug>`.
+  Cheaper still: read it out of an aggregator posting URL. Every company the
+  aggregator already supplies is one whose token it is handing you, and moving
+  it into `BOARDS` converts a days-late alert into a same-day one — 52 currently
+  live roles are already won that way. For a Workday tenant, POST with
+  `appliedFacets: {}` and read the country facet's real name out of the
+  response's own `facets` array rather than guessing it.
 - **What counts as new-grad / SWE** — the regexes at the top of `src/filter.js`.
   After loosening either one, re-run `npm run bootstrap`, or the newly-matching
   backlog gets announced as new.
@@ -416,6 +422,13 @@ rediscovered:
   company board immediately. Every company moved from the aggregator into
   `BOARDS` is one whose postings arrive the day they go live — which is the
   structural fix for latency, and the argument for growing that list.
+- **A Workday tenant without a country facet is not worth polling.** It answers
+  fine with `searchText` alone, but the newest 20 then come from anywhere:
+  NVIDIA's are all Israel, Mastercard's Dublin and Pune. The page budget is
+  spent before a US/Canada role appears, which is the same failure the search
+  term fixes for the banks. Roughly half of Workday tenants expose no country
+  facet at all (`locationMainGroup` is a hierarchy, not a country list), so they
+  stay on the aggregator.
 - **Assigning `.href` does not neutralize a `javascript:` URL.** Apply links come
   from third-party boards; the UI checks the scheme before making one clickable,
   and the poller drops non-http(s) URLs before that.
