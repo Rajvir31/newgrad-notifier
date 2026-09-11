@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { countryOf, channelsFor, isNewGrad, isSweRole, needsClearance } from './filter.js';
-import { blocksFor, postJobs, mentionTag } from './slack.js';
+import { countryOf, channelsFor, isNewGrad, isSweRole, needsClearance, usEligibility, sponsorshipStatus, clearanceStatus } from './filter.js';
+import { htmlToText, jobPostingJsonLd } from './description.js';
+import { blocksFor, postJobs, mentionTag, ageLabel } from './slack.js';
 import { relativeToEpoch, splitLocations } from './sources.js';
-import { normalizeUrl, collapse, pickFresh, idsOf, KEY } from './poll.js';
+import { normalizeUrl, collapse, pickFresh, pickQueued, idsOf, KEY } from './poll.js';
 
 // Country routing — every entry here is a trap that bit a naive implementation.
 for (const [loc, want] of [
@@ -93,31 +94,89 @@ for (const [title, want] of [
   assert.equal(isNewGrad({ title }), want, `unscoped isNewGrad(${JSON.stringify(title)})`);
 }
 
-// Role relevance: Simplify's curated category wins when present; otherwise the
-// title needs an engineering noun AND a technical domain. A domain word alone
-// used to let legal and design roles through.
-assert.equal(isSweRole({ title: 'Analyst', category: 'Software' }), true);
-assert.equal(isSweRole({ title: 'Mechanical Design Engineer', category: 'Hardware' }), false);
-assert.equal(isSweRole({ title: 'Backend Developer' }), true);
-assert.equal(isSweRole({ title: 'Machine Learning Engineer' }), true);
-assert.equal(isSweRole({ title: 'Systems Engineer' }), true);
-assert.equal(isSweRole({ title: 'Registered Nurse' }), false);
-assert.equal(isSweRole({ title: 'Regulatory Counsel, AI Regulation, US' }), false);
-assert.equal(isSweRole({ title: 'Safety & Security Counsel' }), false);
-assert.equal(isSweRole({ title: 'Designer, Web, Presence & Platform' }), false);
-assert.equal(isSweRole({ title: 'Mechanical Design Engineer' }), false);
+// Role relevance is an allowlist: the title itself must read as a build-software
+// job. `category` is not a signal — the aggregator tags "Broista" as AI/ML/Data
+// and a genuine "Software Engineer - Crypto and Cross Domain Solutions" as
+// Hardware, so it is wrong in both directions.
+for (const [title, want] of [
+  // Software on sight, no supporting domain word in the title.
+  ['Software Engineer, New Grad', true],
+  ['Associate Software Engineer', true],
+  ['Software Engineering Associate', true],
+  ['Software Development Graduate - AI', true],
+  ['Graduate Programmer', true],
+  ['SDE 1', true],
+  // Build noun + software domain.
+  ['Backend Developer', true],
+  ['Machine Learning Engineer', true],
+  ['Systems Engineer', true],
+  ['Data Engineer 1 - Enterprise Technology Services', true],
+  ['AI Engineer - Early Career', true],
+  ['Forward Deployed Infrastructure Engineer, New Grad', true],
+  ['SQL Server Developer', true],
+  ['Data Warehouse Software Engineer', true],
+  // A title may name the LANGUAGE and no domain at all. These reached the
+  // channel through the old `category` pass; ~37 were live when the allowlist
+  // replaced it, every one an unambiguous entry-level dev job.
+  ['Entry Level .Net Developer', true],
+  ['Java Developer', true],
+  ['Junior Java Developer', true],
+  ['Graduate C++ Developer', true],
+  ['Angular JS Developer', true],
+  ['Support Engineer - Python', true],
+  ['Mainframe Developer', true],
+  ['Salesforce Developer', true],
+  // `\balgorithm\b` cannot match the plural, and the neighbouring alternatives
+  // all handle theirs — "Applied Algorithms Engineer New Grad" was rejected.
+  ['Algorithm Engineer, New Grad', true],
+  ['Algorithms Engineer, New Grad', true],
+  // Analyst / scientist / BI titles. These are the flood the category pass let
+  // in: 174 of 382 alerts came from Simplify's AI/ML/Data tag alone.
+  ['Data Analyst', false],
+  ['Associate Data Scientist - Decision Analytics', false],
+  ['Business Intelligence Analyst - Data & Analytics', false],
+  ['Applied Machine Learning Scientist', false],
+  ['AI Business Development Analyst', false],
+  ['Analytics Leadership Development Program Associate', false],
+  // Banking. Both of these passed on a domain word alone ("Infrastructure",
+  // "Solutions") while `analyst` still counted as an engineering noun.
+  ['2027 Investment Banking Analyst I - Energy, Infrastructure, & Transition', false],
+  ['2027 Analyst I, Equity Solutions Group', false],
+  // Not technical at all, yet all shipped under a technical category.
+  ['Broista', false],
+  ['Barback', false],
+  ['Sales Associate', false],
+  ['Customer Service Representative', false],
+  ['Research Assistant - Instructional', false],
+  ['Patient Coordinator', false],
+  ['Registered Nurse', false],
+  ['Born Digital Aide', false],
+  ['AI Model Policy Trainer', false],
+  // A domain word without a build noun is not a software role.
+  ['Regulatory Counsel, AI Regulation, US', false],
+  ['Designer, Web, Presence & Platform', false],
+  ['GIS/Cartography Technician 1', false],
+  ['Robot Teleoperation Specialist', false],
+  // A language token still needs a build noun beside it.
+  ['SAP Material Master Data Specialist', false],
+  // A build noun outside software.
+  ['Mechanical Design Engineer', false],
+  ['Electrical Engineer New Grad', false],
+  // Correctly paired, but the qualifier says the job is not building anything.
+  ['Engineering Technician - Abuse Test & Engineering', false],
+  ['Systems Engineer/Analyst', false],
+  ['Software Engineering TRAIL Operations Specialist', false],
+]) {
+  assert.equal(isSweRole({ title }), want, `isSweRole(${JSON.stringify(title)})`);
+}
 
-// The aggregator files plainly non-software roles under a technical category,
-// so a category match alone is not enough.
-assert.equal(isSweRole({ title: 'Patient Coordinator', category: 'Software' }), false);
+// The category cannot rescue a non-software title, and cannot sink a real one.
+assert.equal(isSweRole({ title: 'Analyst', category: 'Software' }), false);
 assert.equal(isSweRole({ title: 'Dental Assistant', category: 'AI/ML/Data' }), false);
-assert.equal(isSweRole({ title: 'Born Digital Aide', category: 'Software' }), false);
-assert.equal(isSweRole({ title: 'AI Model Policy Trainer', category: 'AI/ML/Data' }), false);
-// ...but the blocklist must not eat real engineering titles that happen to
-// contain one of those words as a technical term.
-assert.equal(isSweRole({ title: 'Data Warehouse Software Engineer', category: 'Software' }), true);
-assert.equal(isSweRole({ title: 'SQL Server Developer', category: 'Software' }), true);
-assert.equal(isSweRole({ title: 'Software Development Graduate - AI', category: 'Software' }), true);
+assert.equal(
+  isSweRole({ title: 'Software Engineer - Crypto and Cross Domain Solutions', category: 'Hardware' }),
+  true
+);
 
 // Structured country hints beat location strings, but only when populated —
 // Ashby ships addressCountry as "" on real Canada-eligible postings.
@@ -131,8 +190,266 @@ assert.deepEqual(channelsFor({ locations: ['Remote - US or Canada'] }), ['US', '
 assert.deepEqual(channelsFor({ locations: ['Remote (United States | Canada)'] }), ['US', 'CA']);
 assert.deepEqual(channelsFor({ locations: ['Toronto, ON, Canada'] }), ['CA']);
 
+// A bare US city name must route. There was no US city list at all — only
+// CA_CITY — so a board naming cities without a state code produced UNKNOWN,
+// then an empty channel list, and poll.js seeds a channel-less job as "decided":
+// silently dropped forever, no retry. Stripe's "Software Engineer, New Grad"
+// lists exactly "San Francisco, Seattle, New York" and was lost this way.
+assert.deepEqual(channelsFor({ locations: ['San Francisco, Seattle, New York'] }), ['US']);
+for (const city of ['San Francisco', 'Seattle', 'Austin', 'Boston', 'Chicago', 'Palo Alto', 'Denver']) {
+  assert.equal(countryOf(city), 'US', `countryOf(${JSON.stringify(city)})`);
+  assert.deepEqual(channelsFor({ locations: [city] }), ['US'], `channelsFor(${JSON.stringify(city)})`);
+}
+
+// ...but the US city list runs LAST, so it must never steal a name that the
+// Canadian or non-North-American tests already claimed.
+for (const [loc, want] of [
+  ['Toronto', 'CA'],
+  ['Vancouver', 'CA'],       // Vancouver BC, not WA
+  ['Vancouver, WA', 'US'],
+  ['Waterloo', 'CA'],
+  ['Waterloo, IA', 'US'],
+  ['London, ON', 'CA'],
+  ['London, UK', 'OTHER'],
+  ['Cambridge, ON', 'CA'],
+  ['Cambridge, MA', 'US'],
+  ['Richmond, BC', 'CA'],
+  ['Richmond, VA', 'US'],
+  ['Ontario, CA', 'US'],     // Ontario, California
+  ['Manchester, UK', 'OTHER'],
+  ['Birmingham, UK', 'OTHER'],
+  ['Durham, NC', 'US'],
+]) {
+  assert.equal(countryOf(loc), want, `countryOf(${JSON.stringify(loc)})`);
+}
+
 assert.equal(needsClearance({ title: 'Developer - Active TS/SCI with Poly' }), true);
 assert.equal(needsClearance({ title: 'Developer' }), false);
+
+// --- Posting age -----------------------------------------------------------
+// Slack's {date_short_pretty} renders "Sep 4", which reads as current at a
+// glance. The age is what tells you a role is actually fresh — an aggregator
+// can surface a week-old posting as brand new, which is exactly what MAX_AGE_DAYS
+// now suppresses.
+{
+  const now = 1788484604;
+  assert.equal(ageLabel(now, now), 'today');
+  assert.equal(ageLabel(now - 3600, now), 'today');
+  assert.equal(ageLabel(now - 86400, now), 'yesterday');
+  assert.equal(ageLabel(now - 4 * 86400, now), '4 days ago');
+  assert.equal(ageLabel(0, now), '', 'an unknown date must render nothing, not "NaN days ago"');
+  assert.equal(ageLabel(undefined, now), '');
+  // A clock skew between the feed and the runner must not read as the future.
+  assert.equal(ageLabel(now + 3600, now), 'today');
+
+  const twoDaysAgo = Math.floor(Date.now() / 1000) - 2 * 86400;
+  const p = blocksFor({ company: 'A', title: 'B', url: 'https://x.test', postedAt: twoDaysAgo });
+  const posted = p.blocks[1].fields[1].text;
+  assert.ok(posted.includes('2 days ago'), `age must appear in the Posted field: ${JSON.stringify(posted)}`);
+  assert.ok(posted.includes('<!date^'), 'the absolute date is kept alongside the age');
+  // A job with no date must not render a stray empty bracket.
+  const q = blocksFor({ company: 'A', title: 'B', url: 'https://x.test', postedAt: 0 });
+  assert.ok(!q.blocks[1].fields[1].text.includes('()'), q.blocks[1].fields[1].text);
+}
+
+// --- US eligibility: sponsorship + clearance -------------------------------
+// Every string below is real text harvested from the live feeds. The rule is
+// exclude ONLY on an explicit statement; silence includes the job.
+const eligible = (description, title = 'Software Engineer') =>
+  usEligibility({ title, description }).ok;
+
+// Explicit "we do not sponsor" -> excluded.
+for (const s of [
+  'We are unable to provide visa sponsorship.',
+  'Visa Sponsorship is not available for this position.',
+  'This role is not eligible for visa sponsorship.',
+  'At this time, CapTech cannot transfer nor sponsor a work visa for this position.',
+  'Applicants must be authorized to work directly for any employer in the United States without visa sponsorship.',
+  'GM does not provide immigration-related sponsorship for this role.',
+  'The company does not sponsor/support H-1B petitions, TN, or Forms I-983/STEM OPT, for this role.',
+  'Must be legally authorized to work in the United States without the need for employer sponsorship, now or at any time in the future.',
+  'Aerotech does not provide US work authorization sponsorship for this position.',
+  'We do not sponsor visas.',
+]) {
+  assert.equal(eligible(s), false, `must exclude on: ${s.slice(0, 60)}`);
+}
+
+// Explicit clearance requirement -> excluded.
+for (const s of [
+  'Hold an active Secret or Top Secret security clearance.',
+  'Ability to obtain and maintain a Secret clearance.',
+  'Position requires an active TS/SCI clearance with polygraph.',
+  'Required Security Clearance: TS/SCI w/Poly',
+  'A government issued security clearance is required.',
+  'CLEARANCE REQUIREMENTS: Department of Defense Secret security clearance is obtainable within a reasonable amount of time after hire.',
+  'However, as a requirement of continued employment in this position you will be required to obtain a Top Secret clearance.',
+  'Are able to obtain an Interim Secret security clearance by your start date.',
+]) {
+  assert.equal(eligible(s), false, `must exclude on: ${s.slice(0, 60)}`);
+}
+
+// Silence, positive statements, and near-misses -> INCLUDED. These are the
+// expensive mistakes: each one is a real posting that a naive regex drops.
+for (const s of [
+  // Nothing said at all.
+  'Build and ship backend services in Go. Bachelor of Science in Computer Science.',
+  // Sponsorship explicitly OFFERED.
+  'Retell AI is open to sponsoring work authorization for qualified candidates.',
+  'H1B sponsorship is available for this position.',
+  // Application-form questions, not policy. A scraped board page carries the
+  // form as well as the description.
+  'Will you now or in the future require sponsorship for employment visa status (e.g., H-1B, etc.)?',
+  'Are you eligible to obtain the security clearance specified in the job description?',
+  // "sponsor" in a non-immigration sense.
+  'You will deliver presentations to technical staff, program leadership, and government sponsors.',
+  'You will analyze simulation outputs and translate results into clear insights for the research sponsor.',
+  'We offer equity, a sponsored 401K, parental leave, and fully paid health insurance.',
+  // Clearance mentioned without being required.
+  'Minimum Clearance Required to Start: None Employee Type: Regular',
+  'Learn more about the background check process for Security Clearances.',
+  'Ability to obtain FAA clearance. Junior Level Bachelor degree in Computer Science.',
+  'Clearance eligibility may be required depending on program.',
+  // Page chrome from a careers-site search sidebar, not the posting.
+  'Location All Category All Department All Telework All Relocation All Clearance Required All Clear',
+]) {
+  assert.equal(eligible(s), true, `must INCLUDE on: ${s.slice(0, 60)}`);
+}
+
+// A missing description means "unknown", never "clean" — a scrape failure must
+// not silently hide a role.
+assert.equal(eligible(''), true, 'no description must include the job');
+assert.equal(eligible(undefined), true, 'undefined description must include the job');
+
+// A clearance requirement is often stated only in the title.
+assert.equal(eligible('', 'Software Engineer - Active TS/SCI Clearance Required'), false);
+
+// The reported reason drives the log line, so it must be the real cause.
+assert.equal(
+  usEligibility({ title: 'X', description: 'We are unable to provide visa sponsorship.' }).reason,
+  'no sponsorship'
+);
+assert.equal(
+  usEligibility({ title: 'X', description: 'Must hold an active Top Secret clearance.' }).reason,
+  'clearance required'
+);
+
+// Status helpers report what was actually found.
+assert.equal(sponsorshipStatus('H1B sponsorship is available for this position.'), 'offered');
+assert.equal(sponsorshipStatus('We cannot sponsor visas.'), 'denied');
+assert.equal(sponsorshipStatus('A normal job description.'), 'none');
+assert.equal(clearanceStatus('Must hold an active Secret clearance.'), 'required');
+assert.equal(clearanceStatus('A normal job description.'), 'none');
+
+// A hard US citizenship requirement is stricter than "we do not sponsor" — no
+// visa makes you eligible for one — so it excludes too.
+for (const s of [
+  'U.S. Citizenship is required for this position.',
+  'Must be a U.S. Citizen.',
+  'This position requires US citizenship.',
+  'Please note US citizenship is required to obtain a Secret Clearance.',
+]) {
+  assert.equal(eligible(s), false, `must exclude on: ${s}`);
+}
+// ...but an EEO nicety is not a restriction.
+for (const s of [
+  'U.S. citizens and permanent residents are encouraged to apply.',
+  'We welcome applicants of all citizenships and backgrounds.',
+  'Citizenship is not required for this role.',
+]) {
+  assert.equal(eligible(s), true, `must INCLUDE on: ${s}`);
+}
+
+// The periods inside "U.S." are not sentence ends. Splitting on them produced
+// "U." / "S." / "Citizenship is required" and no pattern could match across it.
+assert.equal(sponsorshipStatus('U.S. Citizenship is required for this role.'), 'denied');
+
+// Simplify curates a sponsorship tag. It is authoritative where present and is
+// the ONLY signal for boards that refuse programmatic reads — iCIMS answers
+// HTTP 405 to any GET, which covers General Dynamics, Peraton and Framatome.
+assert.equal(usEligibility({ title: 'X', sponsorshipTag: 'Does Not Offer Sponsorship' }).ok, false);
+assert.equal(usEligibility({ title: 'X', sponsorshipTag: 'U.S. Citizenship is Required' }).ok, false);
+assert.equal(
+  usEligibility({ title: 'X', sponsorshipTag: 'U.S. Citizenship is Required' }).reason,
+  'US citizenship required'
+);
+assert.equal(usEligibility({ title: 'X', sponsorshipTag: 'Offers Sponsorship' }).ok, true);
+// "Other" is Simplify's value for "unknown", which must not exclude anything —
+// it is 20,014 of 20,117 rows.
+assert.equal(usEligibility({ title: 'X', sponsorshipTag: 'Other' }).ok, true);
+assert.equal(usEligibility({ title: 'X', sponsorshipTag: '' }).ok, true);
+
+// --- Description extraction ------------------------------------------------
+// JSON-LD is preferred over stripping the document because the page body also
+// carries nav, search widgets and the application form. Huntington Ingalls'
+// careers page yields "Clearance Required All" from a filter dropdown.
+{
+  const html = `<html><head>
+    <script type="application/ld+json">
+      {"@type":"JobPosting","description":"<p>Build services.</p><p>No clearance needed.</p>"}
+    </script></head>
+    <body><nav>Clearance Required All Telework All</nav></body></html>`;
+  const text = jobPostingJsonLd(html);
+  assert.ok(text.includes('Build services'), 'JSON-LD description is extracted');
+  assert.ok(!text.includes('Telework All'), 'page chrome is excluded from the JSON-LD text');
+
+  // Greenhouse returns `content` ENTITY-ESCAPED. A single strip-then-decode
+  // pass leaves literal tags in the output and, worse, never turns </p> into a
+  // sentence break — collapsing the whole posting into one sentence and letting
+  // a negation in one bullet bind to "sponsorship" in a distant one.
+  const escaped = '&lt;p&gt;Authorized to work.&lt;/p&gt;&lt;p&gt;Sponsorship available.&lt;/p&gt;';
+  const decoded = htmlToText(escaped);
+  assert.ok(!/<[a-z/]/i.test(decoded), `escaped markup must not survive: ${decoded}`);
+  assert.ok(decoded.includes('Authorized to work.'), decoded);
+  assert.ok(decoded.includes('Sponsorship available.'), decoded);
+
+  // An array payload, and @graph, are both common in the wild.
+  assert.ok(
+    jobPostingJsonLd('<script type="application/ld+json">[{"@type":"WebSite"},{"@type":"JobPosting","description":"Hi"}]</script>').includes('Hi')
+  );
+  // One malformed block must not abandon the rest.
+  assert.ok(
+    jobPostingJsonLd(
+      '<script type="application/ld+json">{ not json </script>' +
+        '<script type="application/ld+json">{"@type":"JobPosting","description":"Good"}</script>'
+    ).includes('Good')
+  );
+  assert.equal(jobPostingJsonLd('<html><body>nothing</body></html>'), '');
+}
+
+assert.equal(htmlToText('<p>One</p><li>Two</li>'), 'One. Two.');
+assert.equal(htmlToText('a&nbsp;b &amp; c'), 'a b & c');
+
+// A question ending a block element must stay a question. The block close
+// appends ". ", so "<p>...sponsorship?</p>" became "...sponsorship?." — no
+// longer terminal — which defeated filter.js's interrogative guard and turned
+// every embedded application-form question into a policy statement. This is the
+// HTML path that Greenhouse, Workday and generic scrapes all take, so the
+// plain-string assertions above do not cover it.
+for (const html of [
+  '<p>Are you legally authorized to work in the United States without sponsorship?</p>',
+  '<p>Are you authorized to work in the US without the need for employer sponsorship?</p>',
+  '<li>Do you currently hold an active Top Secret clearance?</li>',
+  '<div>Will you now or in the future require sponsorship for employment visa status?</div>',
+]) {
+  const text = htmlToText(html);
+  assert.ok(/\?$/.test(text), `question must stay terminal, got: ${text}`);
+  assert.equal(eligible(text), true, `form question must not exclude: ${text.slice(0, 50)}`);
+}
+// ...but a STATEMENT in the same markup still excludes.
+assert.equal(eligible(htmlToText('<p>We are unable to provide visa sponsorship.</p>')), false);
+assert.equal(eligible(htmlToText('<li>Must hold an active Top Secret clearance.</li>')), false);
+
+// The citizenship pattern runs against third-party HTML the poller does not
+// control. A nested `(\w+\s*){0,3}` quantifier backtracked cubically there —
+// 18 seconds on a 2,000-char unbroken word run, enough to stall the poll past
+// the workflow timeout and lose the record of what was already delivered.
+{
+  const nasty = 'US citizen ' + 'word_'.repeat(800); // 4,000 chars, no "required"
+  const started = Date.now();
+  usEligibility({ title: 'Software Engineer', description: nasty });
+  const ms = Date.now() - started;
+  assert.ok(ms < 1000, `citizenship regex backtracking: ${ms}ms on a 4k word run`);
+}
 
 // --- Slack payload ---------------------------------------------------------
 // Slack rejects the whole message on a limit breach, so the caps are asserted
@@ -370,6 +687,46 @@ assert.deepEqual(splitLocations(undefined), []);
     return fresh.length;
   });
   assert.deepEqual(posted, [1, 0, 0, 0, 0], 'a flapping feed must not re-announce the same role');
+}
+
+// --- Replay ----------------------------------------------------------------
+// `--bootstrap` and the first run both write state WITHOUT posting, so every
+// role open at that moment is suppressed permanently. The replay queue is the
+// only way back: it announces roles the seen-set has already retired.
+{
+  const gh = {
+    id: 'gh:stripe:1',
+    title: 'Software Engineer, New Grad',
+    company: 'Stripe',
+    locations: ['San Francisco, Seattle, New York'],
+    url: 'https://boards.greenhouse.io/stripe/jobs/1?gh_jid=1',
+    postedAt: 1788484604,
+    source: 'Greenhouse',
+  };
+  const other = { ...gh, id: 'gh:stripe:2', url: 'https://boards.greenhouse.io/stripe/jobs/2', title: 'Backend Engineer, New Grad' };
+  const cands = collapse([gh, other]);
+  assert.equal(cands.length, 2);
+
+  // Everything already seen: a normal poll announces nothing...
+  const seenSet = new Set(cands.flatMap(idsOf).map(KEY));
+  assert.equal(pickFresh(cands, seenSet).length, 0, 'seen roles must not re-announce on a normal poll');
+
+  // ...but the queue picks out exactly the queued role, seen or not.
+  const queued = pickQueued(cands, new Set([KEY('gh:stripe:1')]));
+  assert.equal(queued.length, 1, 'replay must announce a queued role despite the seen-set');
+  assert.equal(queued[0].id, 'gh:stripe:1');
+  assert.equal(pickQueued(cands, new Set()).length, 0, 'an empty queue replays nothing');
+
+  // The queue is keyed on every copy's id, because it records whichever feed
+  // won at bootstrap time and a different feed may win now.
+  const si = { ...gh, id: 'simplify:abc', source: 'Simplify', url: gh.url + '&embed=true' };
+  const merged = collapse([gh, si]);
+  assert.equal(merged.length, 1);
+  assert.equal(
+    pickQueued(merged, new Set([KEY('simplify:abc')])).length,
+    1,
+    'a queue entry naming the losing copy must still match the collapsed role'
+  );
 }
 
 console.log('all assertions passed');

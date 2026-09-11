@@ -11,11 +11,16 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { fetchAll } from './sources.js';
-import { isNewGrad, isSweRole, channelsFor, needsClearance } from './filter.js';
+import { isNewGrad, isSweRole, channelsFor, usEligibility } from './filter.js';
+import { attachDescriptions } from './description.js';
 import { checkAuth, postJobs, blocksFor } from './slack.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STATE = resolve(ROOT, 'data/seen.json');
+// A queue of already-seen ids to announce anyway. `--bootstrap` and the very
+// first run both write state WITHOUT posting, so everything open at that moment
+// is suppressed forever — there was no way to recover a role once seeded.
+const REPLAY = resolve(ROOT, 'data/replay.json');
 
 // Ids are stored as 48-bit hashes: it keeps the committed state file small
 // enough that git deltas stay cheap, and stops a public repo from publishing a
@@ -27,18 +32,42 @@ const KEY = (id) => createHash('sha256').update(id).digest('hex').slice(0, 12);
 // diff and therefore no commit.
 const MAX_SEEN = 50_000;
 
-// A posting older than this is backlog, not news. Without it, adding a board
-// replays that company's entire history into the channel on the next poll.
-const MAX_AGE_DAYS = 14;
+// A posting older than THIS MANY DAYS is backlog, not news — measured from the
+// company's own posting date, not from when we first saw it. Two jobs it does:
+//
+//  1. Stops adding a board from replaying that company's entire history.
+//  2. Suppresses the aggregator's ingestion tail. Simplify's `date_posted` is
+//     honest about when the COMPANY posted, but it surfaces rows on its own
+//     schedule: median 0.9 days behind, p90 6.5 days, and a measured max of
+//     6.8. Those late arrivals look brand new to the seen-set diff and were
+//     announced as news, so an alert would land for a role posted a week
+//     earlier — which is what this is set low to prevent.
+//
+// 3 days keeps 97% of real alert volume (157 of the last 162) while dropping
+// exactly that stale tail. Raise it with MAX_AGE_DAYS if the poller is going to
+// be down longer than the window: a posting that ages out during an outage is
+// skipped permanently, because the seen-set never learns it existed.
+const MAX_AGE_DAYS = Number(process.env.MAX_AGE_DAYS) || 3;
 
 // If a poll ever finds more new jobs than this, something broke upstream (an id
 // format changed, a feed was rebuilt) rather than 200 roles going live at once.
 // Seed them instead of firing them into the channel.
 const MAX_BURST = 60;
 
+// A replay bypasses MAX_BURST, so it needs its own bound. State is only durable
+// once the whole batch resolves and the workflow commits it, so an unbounded
+// batch that hits the 10-minute job timeout mid-send loses the record of every
+// message already delivered and re-posts them on the next replay. At PACE_MS
+// (1.1s per channel) 50 messages is under a minute of pacing with plenty of
+// headroom for Slack's 429 back-off. Larger backlogs drain over several runs.
+const REPLAY_BATCH = 50;
+
 const argv = new Set(process.argv.slice(2));
 const DRY = argv.has('--dry');
 const BOOTSTRAP = argv.has('--bootstrap');
+// Announce the queue in data/replay.json instead of diffing against the
+// seen-set. Deliberate operator action, so the burst guard does not apply.
+const REPLAYING = argv.has('--replay');
 
 function loadSeen() {
   try {
@@ -54,6 +83,26 @@ function saveSeen(ids) {
   const kept = ids.slice(-MAX_SEEN);
   writeFileSync(STATE, JSON.stringify({ ids: kept }, null, 0) + '\n');
   return kept.length;
+}
+
+function loadReplay() {
+  try {
+    const parsed = JSON.parse(readFileSync(REPLAY, 'utf8'));
+    return Array.isArray(parsed.ids) ? parsed.ids : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Drop the ids that made it out. What remains is retried by the next replay
+ * run, so a batch interrupted halfway (rate limit, runner timeout) resumes
+ * instead of either duplicating what was sent or losing what was not.
+ */
+function saveReplay(ids) {
+  mkdirSync(dirname(REPLAY), { recursive: true });
+  writeFileSync(REPLAY, JSON.stringify({ ids }, null, 0) + '\n');
+  return ids.length;
 }
 
 // Tracking junk varies by source for the same posting — Simplify appends
@@ -140,6 +189,16 @@ export function pickFresh(candidates, seenSet) {
   return candidates.filter((j) => !idsOf(j).some((id) => seenSet.has(KEY(id))));
 }
 
+/**
+ * The replay counterpart: pick the roles whose ids are queued, regardless of
+ * the seen-set. Keyed on every copy's id for the same reason pickFresh is —
+ * the queue records whichever feed won at bootstrap time, which is not
+ * necessarily the feed winning now.
+ */
+export function pickQueued(candidates, replaySet) {
+  return candidates.filter((j) => idsOf(j).some((id) => replaySet.has(KEY(id))));
+}
+
 function describe(job, channels) {
   const where = job.locations?.length ? job.locations.join(' / ') : '?';
   return `[${channels.join('+') || '--'}] ${job.company} — ${job.title}  (${where})  ${job.url}`;
@@ -171,26 +230,75 @@ async function main() {
     );
   }
 
-  const cutoff = Math.floor(Date.now() / 1000) - MAX_AGE_DAYS * 86400;
+  // A replay is an explicit "announce exactly these ids" instruction, so it
+  // bypasses the freshness window the same way it bypasses the burst guard.
+  // Applying MAX_AGE_DAYS here would be a silent no-op: a backlog is old by
+  // definition (the queued roles currently run to a 10.6-day median), so every
+  // replay run would match nothing and the queue would never drain.
+  const cutoff = REPLAYING ? 0 : Math.floor(Date.now() / 1000) - MAX_AGE_DAYS * 86400;
   const seen = loadSeen();
   const seenSet = new Set(seen);
+  const queue = REPLAYING ? loadReplay() : [];
 
   const candidates = collapse(jobs, { cutoff });
 
-  const fresh = pickFresh(candidates, seenSet);
+  const fresh = REPLAYING
+    ? pickQueued(candidates, new Set(queue))
+    : pickFresh(candidates, seenSet);
   // A job is deliverable only if it routes to a channel that is actually
   // configured. If SLACK_CHANNEL_CA is unset or mistyped, Canadian roles are
   // NOT quietly marked seen — that would suppress them permanently while the
   // workflow still reported success.
   // --dry / --bootstrap have no Slack config, so every channel counts as open.
   const configured = (c) => (live ? Boolean(channels[c]) : true);
-  const routed = fresh
+  const routedAll = fresh
     .map((job) => ({ job, channels: job.channels.filter(configured) }))
     .filter((r) => r.channels.length);
+  // Cap a replay so one run cannot outlive the job timeout mid-batch. Whatever
+  // is left stays queued and goes out on the next replay run. Capping BEFORE the
+  // eligibility gate keeps the description fetches proportional to what is
+  // actually about to be sent.
+  const capped = REPLAYING ? routedAll.slice(0, REPLAY_BATCH) : routedAll;
+
+  // US eligibility gate. Sponsorship and clearance statements live in the
+  // description body, which no list endpoint returns, so this is the one place
+  // the poller fetches them — for the handful of US roles about to be alerted,
+  // never for the ~10k scanned. Skipped on --bootstrap, which posts nothing.
+  const gated = [];
+  const usBound = capped.filter((r) => r.channels.includes('US'));
+  if (usBound.length && !BOOTSTRAP) {
+    console.log(`checking sponsorship/clearance for ${usBound.length} US role(s)...`);
+    await attachDescriptions(usBound.map((r) => r.job));
+    for (const r of usBound) {
+      const verdict = usEligibility(r.job);
+      if (verdict.ok) continue;
+      // Drop ONLY the US channel. A role open in both countries is still a
+      // perfectly good Canadian posting — US visa sponsorship does not apply
+      // to it, and silently deleting it from #canada would be a regression.
+      r.channels = r.channels.filter((c) => c !== 'US');
+      r.job.channels = r.job.channels.filter((c) => c !== 'US');
+      gated.push({ job: r.job, reason: verdict.reason });
+    }
+  }
+  // A role gated out of every channel it had is DECIDED, not pending: it falls
+  // out of `routed` here and is picked up by seedable()'s no-channel branch, so
+  // it is marked seen and never re-fetched.
+  const routed = capped.filter((r) => r.channels.length);
   const deliverable = new Set(routed.map((r) => r.job.id));
 
+  if (gated.length) {
+    console.log(`${gated.length} US role(s) excluded:`);
+    for (const g of gated.slice(0, 20)) {
+      console.log(`  [${g.reason}] ${g.job.company} — ${g.job.title}`);
+    }
+    if (gated.length > 20) console.log(`  ... and ${gated.length - 20} more`);
+  }
+
   console.log(
-    `${candidates.length} new-grad SWE roles, ${fresh.length} unseen, ${routed.length} deliverable`
+    REPLAYING
+      ? `${candidates.length} new-grad SWE roles, ${queue.length} queued for replay, ` +
+          `${routed.length} deliverable this batch (of ${routedAll.length} matched)`
+      : `${candidates.length} new-grad SWE roles, ${fresh.length} unseen, ${routed.length} deliverable`
   );
 
   // Seed everything that was CONSIDERED AND DELIVERABLE. Jobs filtered out for
@@ -222,17 +330,22 @@ async function main() {
     return;
   }
 
-  if (seen.length === 0) {
+  if (seen.length === 0 && !REPLAYING) {
     const kept = saveSeen(nextSeen);
     console.log(`first run: seeded ${kept} ids without posting (re-run to start alerting)`);
     return;
   }
 
-  if (routed.length > MAX_BURST) {
+  // The burst guard catches a feed changing shape. A replay is a deliberate
+  // request to announce a known list, so the count is expected, not suspicious —
+  // and applying the guard here would silently re-swallow the exact backlog the
+  // replay exists to recover.
+  if (routed.length > MAX_BURST && !REPLAYING) {
     const kept = saveSeen(nextSeen);
     console.warn(
       `!! ${routed.length} new roles exceeds the ${MAX_BURST} burst guard — a feed probably changed shape.\n` +
-        `   Seeded ${kept} ids without posting. Check the diff, then let the next poll run normally.`
+        `   Seeded ${kept} ids without posting. Check the diff, then let the next poll run normally.\n` +
+        `   To announce them anyway: queue their ids in data/replay.json and run with --replay.`
     );
     return;
   }
@@ -249,6 +362,27 @@ async function main() {
 
   if (!Object.keys(byChannel).length) {
     saveSeen(nextSeen);
+    // Retire anything the gate decided against even though nothing was posted —
+    // otherwise a batch that is entirely ineligible re-fetches its descriptions
+    // on every future replay and the queue never drains. Only fully-gated roles
+    // qualify: one that kept a channel simply had no CONFIGURED channel left,
+    // and must stay queued until that secret is fixed.
+    const fullyGated = gated.filter((g) => !g.job.channels.length);
+    if (REPLAYING && fullyGated.length) {
+      const done = new Set(fullyGated.map((g) => g.job).flatMap(idsOf).map(KEY));
+      const left = saveReplay(queue.filter((k) => !done.has(k)));
+      console.log(`replay: 0 announced, ${fullyGated.length} excluded, ${left} still queued`);
+    } else if (REPLAYING && queue.length) {
+      // Nothing MATCHED — a feed carrying the queued roles was down, the ids are
+      // in the wrong format, or they have aged past MAX_AGE_DAYS — not that they
+      // were delivered. Truncating the file on a run that posted nothing would
+      // discard the whole backlog silently, which is the exact failure the
+      // replay queue exists to undo.
+      console.warn(
+        `replay: ${queue.length} queued ids matched nothing deliverable this run — queue left intact.\n` +
+          `   Ids must be 12-hex sha256(id) prefixes, and the roles must still be within MAX_AGE_DAYS.`
+      );
+    }
     console.log('nothing to post');
     return;
   }
@@ -260,6 +394,30 @@ async function main() {
   // forever while the workflow reports success.
   const kept = saveSeen(seedable(new Set(failed.map((j) => j.id))));
   console.log(`state: ${kept} ids`);
+
+  if (REPLAYING) {
+    // Retire only what actually went out. Anything that failed, and anything
+    // whose posting has since fallen outside the age window or off its board,
+    // is left queued rather than dropped on the floor.
+    //
+    // Roles the eligibility gate excluded ARE retired: they were examined and
+    // decided against, so leaving them queued would re-fetch their descriptions
+    // on every future replay and never drain.
+    //
+    // Only those gated out of EVERY channel, though. A US+CA role that merely
+    // lost its US channel is still being delivered to #canada — retiring it
+    // here would cancel the `failed` exclusion above and lose it for good.
+    const done = new Set(
+      routed
+        .map((r) => r.job)
+        .filter((j) => !failed.includes(j))
+        .concat(gated.filter((g) => !g.job.channels.length).map((g) => g.job))
+        .flatMap(idsOf)
+        .map(KEY)
+    );
+    const left = saveReplay(queue.filter((k) => !done.has(k)));
+    console.log(`replay: ${queue.length - left} announced, ${left} still queued`);
+  }
 
   if (failures.length) {
     console.warn(`${failures.length} feed(s) failed: ${failures.map((f) => f.name).join(', ')}`);

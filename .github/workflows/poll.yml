@@ -11,10 +11,16 @@ on:
     # and this repo's first schedule did not fire for over an hour.
     - cron: '5,15,25,35,45,55 * * * *'
   workflow_dispatch: # manual kick — and it counts as repo activity, see below
+    inputs:
+      replay:
+        description: 'Announce the backlog queued in data/replay.json instead of polling for new roles'
+        type: boolean
+        default: false
 
-# THE REPO MUST BE PUBLIC. 144 runs/day is ~4,320 runs a month; even at 30s each
-# that is over the 2,000-minute GitHub Free allowance for a private repo. Minutes
-# on standard runners are free for public repos.
+# THE REPO MUST BE PUBLIC. Minutes on standard runners are free for public repos;
+# on a private one this would not fit the 2,000-minute Free allowance, and the
+# LOOP_MINUTES window below makes each run far longer than the ~30s a single poll
+# takes, so the gap is much wider than it looks.
 #
 # Public repos also get scheduled workflows auto-disabled after 60 days with no
 # repository activity. It is not documented whether the bot's own state commits
@@ -26,19 +32,47 @@ permissions:
 
 concurrency:
   group: poll-jobs
-  cancel-in-progress: false # a late run should queue, never die mid-notification
+  # A late run should queue, never die mid-notification. With LOOP_MINUTES set,
+  # a scheduled run holds this group for the whole window — which is exactly why
+  # POLL_LOOP_MINUTES must go to 0 once an external cron is dispatching every 10
+  # minutes, or those dispatches just pile up behind the loop.
+  cancel-in-progress: false
+
+env:
+  # How long a SCHEDULE-triggered run keeps polling before it exits.
+  #
+  # Measured over 4.7 days: GitHub delivered 7.7 scheduled runs a day against
+  # the 144 this cron asks for (5.3% of slots), and never two closer than 101
+  # minutes apart. The throttle is applied to the repo, not to the expression,
+  # so no edit to the cron above changes it. Looping inside the run is the only
+  # way to get more polls out of each slot GitHub does grant.
+  #
+  # Set the POLL_LOOP_MINUTES repository variable to 0 once an external cron is
+  # driving workflow_dispatch (see "If the schedule never fires" in the README).
+  # The loop is a fallback for GitHub's clock, not a substitute for a real one.
+  #
+  # The default is applied in bash as ${LOOP_MINUTES:-40}, NOT with `||` here:
+  # a repository variable is always a string, and relying on the truthiness of
+  # the string "0" to pick a default is exactly the kind of thing that would
+  # silently ignore POLL_LOOP_MINUTES=0 — the one value that matters most.
+  LOOP_MINUTES: ${{ vars.POLL_LOOP_MINUTES }}
+  POLL_EVERY_SECONDS: '600'
+  # Empty on every trigger except a dispatch with the replay box ticked. Safe to
+  # use `&&`/`||` here because `inputs.replay` is a real boolean, not a string.
+  REPLAY_FLAG: ${{ inputs.replay && '--replay' || '' }}
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Must clear LOOP_MINUTES plus one poll (~30s) with room for Slack back-off.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7 # persist-credentials defaults true, so the push below is authenticated
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
-      - run: node src/poll.js
+      - name: Poll, committing state after every pass
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           # Variables, not secrets. Channel IDs are not sensitive (they appear in
@@ -50,15 +84,91 @@ jobs:
           # Optional. Your Slack member ID — every alert @-mentions you, which
           # pings regardless of the channel's notification preference.
           SLACK_MENTION: ${{ vars.SLACK_MENTION }}
-
-      - name: Commit seen-state
         run: |
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/seen.json
-          # Exits 0 when nothing is staged, so the step short-circuits before
-          # `git commit` can fail with "nothing to commit". Most polls find no
-          # new jobs and therefore produce no commit at all.
-          git diff --staged --quiet && echo 'no new jobs' && exit 0
-          git commit -m "state: $(date -u +%FT%TZ)"
+
+          # Committing INSIDE the loop rather than once at the end. A run killed
+          # by the job timeout must not lose the record of alerts it already
+          # sent, or the next run announces every one of them a second time.
+          commit_state() {
+            # -A on the directory: data/replay.json does not exist until a
+            # backlog has been queued, and naming a missing path fails `git add`.
+            git add -A data/
+            # Most polls find nothing new, so there is usually nothing to commit.
+            if ! git diff --staged --quiet; then
+              git commit -m "state: $(date -u +%FT%TZ)"
+            fi
+            # Push whenever HEAD is ahead of the remote — NOT merely when
+            # something was just staged. A commit whose push failed earlier is
+            # no longer "staged", so a staged-only guard would strand it on the
+            # runner: the next run checks out origin without it, sees those ids
+            # as unseen, and re-posts the entire window to Slack.
+            if [ "$(git rev-list --count @{u}..HEAD 2>/dev/null || echo 0)" -eq 0 ]; then
+              return 0
+            fi
+            if git push; then
+              return 0
+            fi
+            # Push rejected: the remote moved (a concurrent run, or this run's
+            # own earlier pass racing a queued one). Rebase onto it and retry.
+            if git pull --rebase; then
+              git push
+              return $?
+            fi
+            # The rebase itself conflicted. Leaving the runner mid-rebase would
+            # put conflict markers in data/seen.json, which loadSeen() cannot
+            # parse — it would fall back to "no state yet" and silently reseed,
+            # destroying the id history. Get back to a clean tree and give up.
+            git rebase --abort || true
+            return 1
+          }
+
+          # Only the throttled schedule loops. A workflow_dispatch is either the
+          # external cron (already polling every 10 minutes), a manual kick, or a
+          # replay batch — each of those wants exactly one pass.
+          # :-40 rather than a `||` default in env: an unset variable arrives as
+          # an empty string, while an explicit 0 must be honoured.
+          minutes="${LOOP_MINUTES:-40}"
+          [ "$GITHUB_EVENT_NAME" = schedule ] || minutes=0
+          deadline=$(( $(date +%s) + minutes * 60 ))
+
+          rc=0
+          pass=0
+          while :; do
+            pass=$(( pass + 1 ))
+            echo "::group::poll $pass"
+            # One bad pass must not abandon the rest of the window — a feed
+            # outage clears on its own. The code is still returned at the end,
+            # so a genuine failure fails the run and emails you.
+            node src/poll.js $REPLAY_FLAG || rc=$?
+            # Stop the window if state could not be persisted. Continuing would
+            # keep posting alerts that cannot be durably recorded, turning a
+            # one-pass duplicate into a whole window of them on the next run.
+            commit_state || { rc=$?; echo '::endgroup::'; echo '!! state not persisted — ending this run early'; break; }
+            echo '::endgroup::'
+            [ $(( deadline - $(date +%s) )) -gt "$POLL_EVERY_SECONDS" ] || break
+            sleep "$POLL_EVERY_SECONDS"
+          done
+          exit $rc
+
+      - name: Commit seen-state
+        # Backstop only. The loop commits after every pass, so this catches the
+        # one case that cannot: the job being killed DURING a poll, after some
+        # messages went out but before that pass committed.
+        if: always()
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A data/
+          if ! git diff --staged --quiet; then
+            git commit -m "state: $(date -u +%FT%TZ)"
+          fi
+          # As in the loop: push on "HEAD is ahead of the remote", not on "the
+          # index is dirty". A commit the loop created but could not push is
+          # invisible to a staged-only check, and losing it re-posts the window.
+          if [ "$(git rev-list --count @{u}..HEAD 2>/dev/null || echo 0)" -eq 0 ]; then
+            echo 'nothing to push'
+            exit 0
+          fi
           git push || (git pull --rebase && git push)

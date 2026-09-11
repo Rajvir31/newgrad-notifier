@@ -1,12 +1,18 @@
 // Source adapters. Every adapter returns jobs normalized to:
 //   { id, title, company, locations: string[], url, postedAt (epoch s),
-//     category?, country?, source }
+//     category?, country?, description?, source }
 // `country` is a STRUCTURED hint ('US' | 'CA'); when present and non-empty it
 // beats location-string parsing. Empty string / null must fall through — 1Password's
 // Ashby board leaves addressCountry "" on 39 of 62 jobs, including Canada-eligible ones.
 //
+// `description` is set only where the list response already carries it (Ashby,
+// Lever). Everything else is fetched on demand by src/description.js, for the
+// few US roles about to be alerted rather than all ~10k scanned.
+//
 // Every endpoint below was confirmed with a live request. All keyless, no
 // User-Agent required, CORS-open. See README for the per-vendor traps.
+
+import { htmlToText } from './description.js';
 
 const TIMEOUT_MS = 25_000;
 
@@ -69,9 +75,11 @@ export const BOARDS = {
     { company: 'TD Bank', host: 'td.wd3.myworkdayjobs.com', tenant: 'td', site: 'TD_Bank_Careers', facet: 'locationCountry', search: 'software' },
     { company: 'BMO', host: 'bmo.wd3.myworkdayjobs.com', tenant: 'bmo', site: 'External', facet: 'Country', search: 'software' },
     { company: 'Sun Life', host: 'sunlife.wd3.myworkdayjobs.com', tenant: 'sunlife', site: 'Experienced', facet: 'Location_Country', search: 'software' },
-    // A dedicated campus board — small and already early-talent scoped, so it is
-    // polled unfiltered rather than searched.
-    { company: 'CIBC', host: 'cibc.wd3.myworkdayjobs.com', tenant: 'cibc', site: 'campus', facet: 'Country', search: '' },
+    // The campus board is early-talent scoped but NOT technical: unsearched, its
+    // newest 20 per country are 20 investment-banking analyst reqs (verified —
+    // 24 of 24 in Canada), so the page budget is spent before a software role
+    // can appear. Searched, it is the same shape as the other three.
+    { company: 'CIBC', host: 'cibc.wd3.myworkdayjobs.com', tenant: 'cibc', site: 'campus', facet: 'Country', search: 'software' },
   ],
 };
 
@@ -103,6 +111,11 @@ export async function fetchSimplify() {
       url: r.url,
       postedAt: r.date_posted,
       category: r.category,
+      // Simplify's own curated flag. Only ~100 of 20k rows carry a real value,
+      // but it is authoritative where present and needs no scraping — which
+      // matters most for iCIMS-hosted boards (General Dynamics, Peraton,
+      // Framatome), whose pages answer HTTP 405 to any programmatic GET.
+      sponsorshipTag: r.sponsorship || '',
       // The repo itself is curated to new-grad roles, so these need no title
       // signal. Every other source is a full company board and does.
       newGradScoped: true,
@@ -152,6 +165,9 @@ async function ashby(org, company) {
           .concat(countries),
         url: j.applyUrl || j.jobUrl,
         postedAt: iso(j.publishedAt),
+        // Already in the list response — the US eligibility gate gets Ashby's
+        // description for free, with no second request.
+        description: j.descriptionPlain || '',
         source: 'Ashby',
       };
     });
@@ -174,6 +190,17 @@ async function lever(slug, company) {
       url: j.applyUrl || j.hostedUrl,
       postedAt: j.createdAt ? secs(j.createdAt) : 0,
       country: j.country === 'CA' ? 'CA' : j.country === 'US' ? 'US' : undefined,
+      // Lever cannot suppress descriptions, so this payload was already paid
+      // for. `lists` holds the requirements bullets, which is usually where the
+      // clearance line lives; `additionalPlain` holds the legal boilerplate
+      // where the sponsorship line lives.
+      description: [
+        j.descriptionPlain || '',
+        ...(j.lists || []).map((l) => `${l.text || ''}. ${htmlToText(l.content)}`),
+        j.additionalPlain || '',
+      ]
+        .filter(Boolean)
+        .join(' '),
       source: 'Lever',
     }));
 }

@@ -62,11 +62,28 @@ export function mentionTag(raw) {
   return /^[UW][A-Z0-9]{6,}$/i.test(id) ? `<@${id.toUpperCase()}>` : '';
 }
 
+/**
+ * "today" / "yesterday" / "4 days ago" for a posting timestamp.
+ *
+ * Rendered NEXT TO the absolute date rather than instead of it. Slack's own
+ * `{date_short_pretty}` token shows "Sep 4", which reads as current at a glance
+ * — the age is the part that tells you whether a role is actually fresh, and
+ * an aggregator can surface a week-old posting as if it were new.
+ */
+export function ageLabel(postedAt, now = Math.floor(Date.now() / 1000)) {
+  if (!postedAt) return '';
+  const days = Math.floor((now - postedAt) / 86400);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return `${days} days ago`;
+}
+
 export function blocksFor(job, mention) {
   const head = `${job.company} — ${job.title}`.slice(0, 150);
   const where = job.locations?.length ? job.locations.join(' • ') : 'Location not listed';
+  const age = ageLabel(job.postedAt);
   const when = job.postedAt
-    ? `<!date^${job.postedAt}^{date_short_pretty} at {time}|posted recently>`
+    ? `<!date^${job.postedAt}^{date_short_pretty}|posted recently>${age ? ` (${age})` : ''}`
     : 'recently';
   const at = mentionTag(mention);
 

@@ -9,6 +9,7 @@
   "scripts": {
     "poll": "node --env-file-if-exists=.env src/poll.js",
     "bootstrap": "node --env-file-if-exists=.env src/poll.js --bootstrap",
+    "replay": "node --env-file-if-exists=.env src/poll.js --replay",
     "dry": "node --env-file-if-exists=.env src/poll.js --dry",
     "test": "node src/test.js",
     "ui": "node src/ui.js",
